@@ -6,6 +6,8 @@ MacDock 面向 Windows 11 x64。安装版安装在当前 Windows 账户中。便
 
 正式安装包尚无 Authenticode 代码签名，Windows 可能显示 SmartScreen 提示。确认来自本仓库的 Release 后，可用 `Get-FileHash -Algorithm SHA256` 与同页的 `SHA256SUMS.txt` 核对文件。
 
+历史 1.9.2 安装包曾在另一台设备触发 Defender 恶意软件检测，已撤回并提交微软复核，结果尚待确认。这与 SmartScreen 未知发布者提示不同。1.9.4 在开发机的 Defender 和 ClamAV 检查中未检出，但不能保证其他设备不会告警。若安全软件拦截，请停止运行并反馈具体检测名称和版本；不要关闭防护或添加排除项。哈希一致只证明文件一致，不证明文件安全。
+
 ## Dock 与桌面抽屉
 
 - 悬停底部白条展开 Dock。点击四窗格，或按 `Ctrl+Alt+Space` 打开抽屉。通过右键菜单固定项目，在自定义视图中拖拽排序。
