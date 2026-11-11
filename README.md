@@ -1,5 +1,8 @@
 # MacDock
 
+> [!IMPORTANT]
+> 1.9.2 安装包收到 Microsoft Defender 检测报告，相关版本已暂时撤下，正在核查。请暂停运行已下载的 1.9.2 安装包，保持 Defender 防护开启。核查进展将在此更新。
+
 **Windows 11 的玻璃 Dock 与桌面抽屉。** 把常用入口固定在底部，把真实桌面收进可搜索、可排序的抽屉。Windows 原生任务栏、Explorer、跳转列表和缩略图照常使用。
 
 [下载最新版](https://github.com/bieshuowola/MacDock/releases/latest) · [使用指南](GUIDE.md) · [版本记录](CHANGELOG.md)
