@@ -5,7 +5,7 @@
 ## 已落地功能
 - 图标保护：Stale-While-Revalidate、透明检测、StockIcon/CLSID 兜底与退避重试
 - 桌面镜像：单双击切换（双重 Ctrl/Shift 多选、扑克牌叠牌跟手与角标、抽屉/Dock 65% 中心投递分流、拖出转接 `FileDrop`、空白处橡皮筋框选、原滚动位置保留与新文件高亮）
-- 全局接收与图钉锁定：外部拖拽（含 `Bitmap` 图像流）唤醒主 Dock 即进入 `ExternalFileDragActive` 全局接收（同盘 Move/跨盘 Copy/防回环自杀/后台 STA I/O），空白/通用区松手直达桌面；抽屉右下角精简为“图钉防收起锁定（按压阴影+ToolTip 联动，全屏/启动/Esc/主动关闭自动解锁）”+“+”
+- 全局接收与图钉锁定：外部拖拽（含 `Bitmap` 图像流）唤醒主 Dock 即进入 `ExternalFileDragActive` 全局接收（同盘 Move/跨盘 Copy/防回环自杀/后台 STA I/O），空白/通用区松手直达桌面；抽屉右下角精简为“图钉防收起锁定”+“+”；支持 `CompositionTarget.Rendering` 首帧防透明同步、图片缩略图后台 `<=96px` 异步降采样及圆角边缘抗锯齿收敛
 - 常驻屏蔽与菜单：空桌面常驻、最大化/全屏隐藏；按住 `SuppressWakeKey` 屏蔽唤醒；`AtLogOn` 计划任务自启；双系统光标（`32650`+`32514`）屏蔽与 1500ms 防抖还原消除右键转圈
 - 首页预览：`distribution/` 已更新 50fps 循环动图 `dock-hover.webp` 与 `drawer-cycle.webp`（`skipDesktop` 隐私隔离）
 
