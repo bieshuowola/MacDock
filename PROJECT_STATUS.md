@@ -4,7 +4,7 @@
 
 ## 已落地功能
 - 图标保护：Stale-While-Revalidate、透明检测、StockIcon/CLSID 兜底与退避重试
-- 桌面镜像：单双击切换（默认单击支持 `Keyboard.Modifiers` + Win32 `GetKeyState`/`GetAsyncKeyState` 双重 Ctrl/Shift 拦截、多选堆叠跟随缩略图与数字角标、抽屉内拖入文件夹高亮归档/拖入程序带参启动与换位精确分流、拖出边界转接原生 `FileDrop`、空白区清选释焦、Ctrl+A 全选）、拖放到 `.exe`/`.lnk` 带参运行、`Alt+点击` 原生属性
+- 桌面镜像：单双击切换（默认单击支持双重 Ctrl/Shift 多选、扑克牌叠牌跟手与角标、文件夹高亮归档+`InternalDropProtected` 防止失焦误收起、拖出转接 `FileDrop`、空白清选释焦、Ctrl+A 全选）、拖放 `.exe` 带参运行、`Alt+点击` 属性
 - 常驻屏蔽：空桌面常驻、最大化/全屏隐藏；按住 `SuppressWakeKey` 自动收起并拦截唤醒
 - 自启菜单：`AtLogOn` 计划任务（降级 `Run`）；双系统光标（`32650`+`32514`）屏蔽与 1500ms 防抖还原消除右键转圈
 - 首页预览：`distribution/` 已更新 50fps 高画质循环动图 `dock-hover.webp` 与 `drawer-cycle.webp`（`skipDesktop` 隐私隔离渲染）
