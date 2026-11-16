@@ -41,9 +41,23 @@
 
 ## 界面预览
 
-| Dock 悬停放大 | 应用抽屉展开与收起 |
-| :---: | :---: |
-| ![Dock 悬停放大](dock-hover.webp) | ![应用抽屉展开与收起](drawer-cycle.webp) |
+<div align="center">
+
+<img src="dock-hover.webp" alt="Dock 悬停波浪放大" width="680" />
+
+<br/>
+
+**Dock 悬停波浪放大**
+
+<br/>
+
+<img src="drawer-cycle.webp" alt="应用抽屉神奇效果（Genie）展开与收起" width="760" />
+
+<br/>
+
+**应用抽屉神奇效果（Genie）展开与收起**
+
+</div>
 
 ---
 
