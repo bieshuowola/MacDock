@@ -4,7 +4,7 @@
 
 面向 Windows 11 的轻量级底部 Dock 与真实桌面抽屉工具
 
-[![Release](https://img.shields.io/badge/release-v1.9.8-0078D4?style=flat-square)](https://github.com/bieshuowola/MacDock/releases/latest)
+[![Release](https://img.shields.io/badge/release-v1.9.9-0078D4?style=flat-square)](https://github.com/bieshuowola/MacDock/releases/latest)
 [![Platform](https://img.shields.io/badge/platform-Windows%2011%20x64-lightgrey?style=flat-square)](https://github.com/bieshuowola/MacDock/releases/latest)
 
 [下载最新版](https://github.com/bieshuowola/MacDock/releases/latest) · [使用指南](GUIDE.md) · [版本记录](CHANGELOG.md)
