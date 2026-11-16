@@ -41,13 +41,9 @@
 
 ## 界面预览
 
-| Dock 悬停放大（动图） | 抽屉展开与收起（动图） |
+| Dock 悬停放大 | 应用抽屉展开与收起 |
 | :---: | :---: |
-| ![Dock 悬停放大动画](dock-hover.webp) | ![抽屉 Genie 展开与收起动画](drawer-cycle.webp) |
-
-| Dock 悬停放大 | 抽屉展开过渡 | 应用抽屉 |
-| :---: | :---: | :---: |
-| ![Dock 悬停放大](dock.png) | ![抽屉从四窗格按钮上方展开](genie.png) | ![应用抽屉完全展开](drawer.png) |
+| ![Dock 悬停放大](dock-hover.webp) | ![应用抽屉展开与收起](drawer-cycle.webp) |
 
 ---
 

@@ -7,6 +7,7 @@
 - 桌面镜像：单双击切换（默认单击支持 Ctrl/Shift 多选、保留多选拖拽、空白区点击清选并释放焦点、Ctrl+A 全选及悬停下划线/手型光标）、拖放到 `.exe`/`.lnk` 带参运行、`Alt+点击` 原生属性
 - 常驻屏蔽：空桌面常驻、最大化/全屏隐藏；按住 `SuppressWakeKey` 自动收起并拦截唤醒
 - 自启菜单：`AtLogOn` 计划任务（降级 `Run`）；双系统光标（`32650`+`32514`）屏蔽与 1500ms 防抖还原消除右键转圈
+- 首页预览：`distribution/` 已更新 50fps 高画质循环动图 `dock-hover.webp` 与 `drawer-cycle.webp`（`skipDesktop` 隐私隔离渲染）
 
 ## 核心源码
 - `Program.cs`：状态机、重试、计划任务自启
