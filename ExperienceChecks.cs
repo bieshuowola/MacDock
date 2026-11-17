@@ -483,7 +483,7 @@ internal static class ExperienceChecks
                 if(dragStarted||a.LeftButton!=MouseButtonState.Pressed)return;
                 dragStarted=true;
                 var data=new DataObject(DataFormats.FileDrop,new[]{srcFile});
-                dragEffect=System.Windows.DragDrop.DoDragDrop(otherWindow,data,DragDropEffects.Move|DragDropEffects.Copy);
+                dragEffect=System.Windows.DragDrop.DoDragDrop(otherWindow,data,DragDropEffects.Move|DragDropEffects.Copy|DragDropEffects.Link);
             };
             otherWindow.Show();
 
@@ -495,14 +495,24 @@ internal static class ExperienceChecks
             Theme.Apply("light");
             foreach(var item in Desktop.DefaultPins().Take(3))
                 c.Store.Data.Entries.Add(new Entry{Path=item.Path,Name=item.Name,Source="system",Pinned=true});
+            var appExe=Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Windows),@"System32\notepad.exe");
+            var appEntry=new Entry{Path=appExe,Name="记事本",Source="desktop",AutoName=false,Pinned=true};
+            c.Store.Data.Entries.Add(appEntry);
+            var cmdScript=Path.Combine(outsideSrc,"alt-open-target.cmd");
+            var altMarker=Path.Combine(outsideSrc,"alt-opened.txt");
+            File.WriteAllText(cmdScript,$"@echo %~nx1>\"{altMarker}\"\r\n");
+            var cmdEntry=new Entry{Path=cmdScript,Name="测试命令",Source="desktop",AutoName=false,Pinned=true};
+            c.Store.Data.Entries.Add(cmdEntry);
             c.Dock.Rebuild();c.Position();c.SetExternalFileDrag(true);c.Expand();c.SettleDockMotion();c.Dock.UpdateLayout();
 
             otherWindow.Activate();
             await Task.Delay(80);
-            // 1. External OLE drag from otherWindow onto Dock general area (Gateway button / Dock edge) -> drops into desktop
+            int launchesBeforeExt=c.LaunchCount;
+            // 1. External OLE drag from otherWindow onto Dock App Icon (notepad.exe) -> MUST deposit to Drawer (safe copy), NOT launch/open-with!
             var srcCenter=otherWindow.PointToScreen(new Point(otherWindow.ActualWidth/2,otherWindow.ActualHeight/2));
-            var dockTarget=c.Dock.GatewayCenter;
-            bool helperActiveDuringDrag=false, dragImgNotOccluded=true;
+            var appTileCenter=c.Dock.TileCenter(appEntry.Id);
+            bool helperActiveDuringDrag=false, dragImgNotOccluded=true, hintVisibleDuringDrag=false;
+            string hintTextDuringDrag="";
             await Task.Run(()=>
             {
                 Native.MovePointer((int)srcCenter.X,(int)srcCenter.Y);
@@ -514,13 +524,15 @@ internal static class ExperienceChecks
                 for(int step=1;step<=12;step++)
                 {
                     double t=step/12.0;
-                    Native.MovePointer((int)Math.Round(srcCenter.X+(dockTarget.X-srcCenter.X)*t),(int)Math.Round(srcCenter.Y+(dockTarget.Y-srcCenter.Y)*t));
+                    Native.MovePointer((int)Math.Round(srcCenter.X+(appTileCenter.X-srcCenter.X)*t),(int)Math.Round(srcCenter.Y+(appTileCenter.Y-srcCenter.Y)*t));
                     Thread.Sleep(25);
                 }
                 Thread.Sleep(180);
                 Application.Current.Dispatcher.Invoke(()=>
                 {
                     helperActiveDuringDrag=Native.DropPreviewHelper.IsActive;
+                    hintVisibleDuringDrag=c.Dock.DropHintVisible;
+                    hintTextDuringDrag=c.Dock.DropHintText;
                     nint di=Native.FindActiveSysDragImage();
                     if(di!=0&&Native.IsWindowAbove(c.Dock.Handle,di))dragImgNotOccluded=false;
                 });
@@ -530,11 +542,85 @@ internal static class ExperienceChecks
 
             var landedPath=Path.Combine(testDesktop,"external-drop-item.txt");
             for(int w=0;w<25&&(!File.Exists(landedPath)||!c.Store.Data.Entries.Any(x=>string.Equals(x.Path,landedPath,StringComparison.OrdinalIgnoreCase)));w++)await Task.Delay(80);
-            var hitHwnd=Native.WindowFromPoint(dockTarget);
-            bool dropPreviewCleanedUp=!Native.DropPreviewHelper.IsActive&&!c.ExternalFileDragActive;
-            bool droppedToDesktop=dragStarted&&File.Exists(landedPath)&&!File.Exists(srcFile)&&c.Store.Data.Entries.Any(x=>string.Equals(x.Path,landedPath,StringComparison.OrdinalIgnoreCase));
-            if(!droppedToDesktop||!helperActiveDuringDrag||Native.DropPreviewHelper.DragEnterCount<=0||Native.DropPreviewHelper.LastEnterEffects==DragDropEffects.None||!dragImgNotOccluded||!dropPreviewCleanedUp)
-                throw new InvalidOperationException($"External Dock drop/preview failed: dropped={droppedToDesktop}, helperActive={helperActiveDuringDrag}, enterCount={Native.DropPreviewHelper.DragEnterCount}, effects={Native.DropPreviewHelper.LastEnterEffects}, notOccluded={dragImgNotOccluded}, cleanedUp={dropPreviewCleanedUp}, dragStarted={dragStarted}, effect={dragEffect}, dock={c.Dock.Handle}, hit={(long)hitHwnd}");
+            var hitHwnd=Native.WindowFromPoint(appTileCenter);
+            bool dropPreviewCleanedUp=!Native.DropPreviewHelper.IsActive&&!c.ExternalFileDragActive&&!c.Dock.DropHintVisible;
+            bool droppedToDesktop=dragStarted&&File.Exists(landedPath)&&File.Exists(srcFile)&&c.Store.Data.Entries.Any(x=>string.Equals(x.Path,landedPath,StringComparison.OrdinalIgnoreCase))&&c.LaunchCount==launchesBeforeExt;
+            if(!droppedToDesktop||!helperActiveDuringDrag||!hintVisibleDuringDrag||hintTextDuringDrag!="松开放入抽屉"||Native.DropPreviewHelper.DragEnterCount<=0||Native.DropPreviewHelper.LastEnterEffects!=DragDropEffects.Copy||!dragImgNotOccluded||!dropPreviewCleanedUp)
+                throw new InvalidOperationException($"External Dock app-hover drop/preview failed: dropped={droppedToDesktop}, srcKept={File.Exists(srcFile)}, hintVis={hintVisibleDuringDrag}, hint='{hintTextDuringDrag}', helperActive={helperActiveDuringDrag}, enterCount={Native.DropPreviewHelper.DragEnterCount}, effects={Native.DropPreviewHelper.LastEnterEffects}, notOccluded={dragImgNotOccluded}, cleanedUp={dropPreviewCleanedUp}, dragStarted={dragStarted}, effect={dragEffect}, launchDelta={c.LaunchCount-launchesBeforeExt}");
+
+            // 1b. Duplicate name + folder + shortcut safe-copy drop onto Dock blank/gateway + cancel test + Alt secondary open
+            var subDir=Path.Combine(outsideSrc,"ext-folder");
+            Directory.CreateDirectory(subDir);
+            File.WriteAllText(Path.Combine(subDir,"inside.txt"),"folder payload");
+            var lnkTarget=Path.Combine(outsideSrc,"lnk-target.txt");
+            File.WriteAllText(lnkTarget,"shortcut target");
+            var lnkFile=Path.Combine(outsideSrc,"ext-link.lnk");
+            var createdLnk=Desktop.CreateShortcut(lnkTarget);
+            File.Move(createdLnk,lnkFile,true);
+            string[] batchFiles=new[]{srcFile,subDir,lnkFile};
+            c.DropFilesToDesktop(batchFiles,copy:true);
+            for(int w=0;w<25&&(!Directory.Exists(Path.Combine(testDesktop,"ext-folder"))||!File.Exists(Path.Combine(testDesktop,"ext-link.lnk")));w++)await Task.Delay(80);
+            bool batchSafeCopyOk=File.Exists(srcFile)&&Directory.Exists(subDir)&&File.Exists(lnkFile)&&Directory.Exists(Path.Combine(testDesktop,"ext-folder"))&&File.Exists(Path.Combine(testDesktop,"ext-link.lnk"))&&Directory.GetFiles(testDesktop,"external-drop-item*.txt").Length>=2;
+            if(!batchSafeCopyOk)
+                throw new InvalidOperationException($"Batch/duplicate safe-copy failed: files={string.Join(",",Directory.GetFiles(testDesktop).Select(Path.GetFileName))}");
+
+            // 1c. Alt + drop onto cmdEntry triggers secondary "open with app" without copying to Drawer
+            c.SetExternalFileDrag(true);c.Expand();c.SettleDockMotion();c.Dock.UpdateLayout();
+            var cmdCenter=c.Dock.TileCenter(cmdEntry.Id);
+            dragStarted=false;dragEffect=DragDropEffects.None;
+            int countBeforeAlt=Directory.GetFileSystemEntries(testDesktop).Length;
+            await Task.Run(()=>
+            {
+                Native.TestKey(0x12,true);
+                Native.MovePointer((int)srcCenter.X,(int)srcCenter.Y);
+                Thread.Sleep(60);
+                Native.TestButton(true);
+                Thread.Sleep(50);
+                Native.MovePointer((int)srcCenter.X+20,(int)srcCenter.Y+15);
+                Thread.Sleep(120);
+                for(int step=1;step<=10;step++)
+                {
+                    double t=step/10.0;
+                    Native.MovePointer((int)Math.Round(srcCenter.X+(cmdCenter.X-srcCenter.X)*t),(int)Math.Round(srcCenter.Y+(cmdCenter.Y-srcCenter.Y)*t));
+                    Thread.Sleep(25);
+                }
+                Thread.Sleep(150);
+                Native.TestButton(false);
+                Thread.Sleep(350);
+                Native.TestKey(0x12,false);
+            });
+            for(int w=0;w<20&&!File.Exists(altMarker);w++)await Task.Delay(80);
+            bool altSecondaryOpenOk=File.Exists(altMarker)&&Directory.GetFileSystemEntries(testDesktop).Length==countBeforeAlt&&!c.Dock.DropHintVisible;
+            if(!altSecondaryOpenOk)
+                throw new InvalidOperationException($"Alt secondary open-with-app failed: markerExists={File.Exists(altMarker)}, desktopCountSame={Directory.GetFileSystemEntries(testDesktop).Length==countBeforeAlt}, hintVis={c.Dock.DropHintVisible}, dragStarted={dragStarted}, dragEffect={dragEffect}, cmdHit={Native.WindowFromPoint(cmdCenter)==c.Dock.Handle}");
+
+            // 1d. Drag into Dock (hint visible) then drag out / Esc cancel -> hint & highlight reset, no file created
+            c.SetExternalFileDrag(true);c.Expand();c.SettleDockMotion();c.Dock.UpdateLayout();
+            dragStarted=false;
+            bool hintShownBeforeCancel=false;
+            await Task.Run(()=>
+            {
+                Native.MovePointer((int)srcCenter.X,(int)srcCenter.Y);
+                Thread.Sleep(60);
+                Native.TestButton(true);
+                Thread.Sleep(50);
+                Native.MovePointer((int)srcCenter.X+20,(int)srcCenter.Y+15);
+                Thread.Sleep(100);
+                for(int step=1;step<=8;step++)
+                {
+                    double t=step/8.0;
+                    Native.MovePointer((int)Math.Round(srcCenter.X+(appTileCenter.X-srcCenter.X)*t),(int)Math.Round(srcCenter.Y+(appTileCenter.Y-srcCenter.Y)*t));
+                    Thread.Sleep(25);
+                }
+                Thread.Sleep(120);
+                Application.Current.Dispatcher.Invoke(()=>{ hintShownBeforeCancel=c.Dock.DropHintVisible; });
+                Native.MovePointer((int)srcCenter.X,(int)srcCenter.Y);
+                Thread.Sleep(120);
+                Native.TestButton(false);
+                Thread.Sleep(200);
+            });
+            if(!hintShownBeforeCancel||c.Dock.DropHintVisible||Directory.GetFileSystemEntries(testDesktop).Length!=countBeforeAlt)
+                throw new InvalidOperationException($"Drag-out cancel reset failed: hintShown={hintShownBeforeCancel}, hintAfter={c.Dock.DropHintVisible}, countAfter={Directory.GetFileSystemEntries(testDesktop).Length} vs {countBeforeAlt}");
 
             // Self-drop loop prevention: dropping file already in testDesktop without copy must be silently ignored
             bool selfLoopIgnored=!c.DropFilesToDesktop(new[]{landedPath},copy:false)&&File.Exists(landedPath);
@@ -721,6 +807,7 @@ internal static class ExperienceChecks
         }
         finally
         {
+            Native.TestKey(0x12,false);
             Native.TestButton(false);
             File.WriteAllText(Path.Combine(Output,"ext-drop-pin-result.json"),JsonSerializer.Serialize(new{pass,detail},new JsonSerializerOptions{WriteIndented=true}));
             backdrop?.Close();
@@ -1097,24 +1184,33 @@ internal static class ExperienceChecks
                 await Task.Delay(80);
             }
 
-            static (double Avg,double P95,double Max,double Fps,int Dropped) Stats(List<(int Cycle,double Phase,double Ms)> list,double budgetMs)
+            static (double Avg,double P50,double P95,double P99,double Max,double Fps,int Dropped) Stats(List<(int Cycle,double Phase,double Ms)> list,double budgetMs)
             {
                 var valid=list.Where(f=>f.Ms>0).Select(f=>f.Ms).OrderBy(x=>x).ToArray();
-                if(valid.Length==0)return (0,0,0,0,0);
+                if(valid.Length==0)return (0,0,0,0,0,0,0);
                 double avg=valid.Average();
+                double p50=valid[(int)Math.Min(valid.Length-1,Math.Floor(valid.Length*0.50))];
                 double p95=valid[(int)Math.Min(valid.Length-1,Math.Floor(valid.Length*0.95))];
+                double p99=valid[(int)Math.Min(valid.Length-1,Math.Floor(valid.Length*0.99))];
                 double max=valid[^1];
                 double fps=1000.0/avg;
                 int dropped=valid.Count(ms=>ms>budgetMs*1.65);
-                return (avg,p95,max,fps,dropped);
+                return (avg,p50,p95,p99,max,fps,dropped);
             }
 
-            var openStat=Stats(openFrames,16.5);
-            var closeStat=Stats(closeFrames,16.5);
+            // Rapid reversal test (expand -> mid-flight collapse -> expand)
+            c.Busy=true;c.Expand();await Task.Delay(50);c.Collapse();await Task.Delay(35);c.Expand();
+            for(int w=0;w<60&&(!c.Dock.IsVisible||c.DockMotionRunning||c.DockProgress<0.99);w++)await Task.Delay(25);
+            bool reversalOk=c.Dock.IsVisible&&!c.DockMotionRunning&&c.DockProgress>=0.99;
+
+            var openStat=Stats(openFrames,frameBudgetMs);
+            var closeStat=Stats(closeFrames,frameBudgetMs);
             bool shotExists=File.Exists(Path.Combine(Output,"dock-stability-open.png"));
-            bool timerDrivenOk=openFrames.Count>=12&&closeFrames.Count>=12&&openStat.Avg<=18.0&&closeStat.Avg<=18.0&&shotExists;
-            pass=timerDrivenOk;
-            detail=$"display={area.Width}x{area.Height}@{refreshHz}Hz(panelBudget={frameBudgetMs:F2}ms, dockTimer=15ms), open[n={openFrames.Count},avg={openStat.Avg:F2}ms,p95={openStat.P95:F2}ms,max={openStat.Max:F2}ms,fps={openStat.Fps:F1},drop={openStat.Dropped}], close[n={closeFrames.Count},avg={closeStat.Avg:F2}ms,p95={closeStat.P95:F2}ms,max={closeStat.Max:F2}ms,fps={closeStat.Fps:F1},drop={closeStat.Dropped}], shot={shotExists}";
+            bool highRefreshOk=openFrames.Count>=20&&closeFrames.Count>=20&&openStat.Avg<=frameBudgetMs*1.45&&closeStat.Avg<=frameBudgetMs*1.45&&shotExists&&reversalOk;
+            pass=highRefreshOk;
+            var openTop=string.Join(",",openFrames.Where(f=>f.Ms>frameBudgetMs*1.65).Select(f=>$"c{f.Cycle}@{f.Phase:F2}={f.Ms:F1}ms"));
+            var closeTop=string.Join(",",closeFrames.Where(f=>f.Ms>frameBudgetMs*1.65).Select(f=>$"c{f.Cycle}@{f.Phase:F2}={f.Ms:F1}ms"));
+            detail=$"display={area.Width}x{area.Height}@{refreshHz}Hz(budget={frameBudgetMs:F2}ms, sync=CompositionTarget), open[n={openFrames.Count},avg={openStat.Avg:F2}ms,p50={openStat.P50:F2}ms,p95={openStat.P95:F2}ms,p99={openStat.P99:F2}ms,max={openStat.Max:F2}ms,fps={openStat.Fps:F1},drop={openStat.Dropped},spikes=[{openTop}]], close[n={closeFrames.Count},avg={closeStat.Avg:F2}ms,p50={closeStat.P50:F2}ms,p95={closeStat.P95:F2}ms,p99={closeStat.P99:F2}ms,max={closeStat.Max:F2}ms,fps={closeStat.Fps:F1},drop={closeStat.Dropped},spikes=[{closeTop}]], reversalOk={reversalOk}, shot={shotExists}";
         }
         catch(Exception ex)
         {

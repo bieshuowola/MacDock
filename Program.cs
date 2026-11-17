@@ -210,13 +210,9 @@ internal sealed class Controller : IDisposable
     }
     internal static bool ShouldCopyToDirectory(string[] files, string destDir, DragDropKeyStates keyStates)
     {
-        if ((keyStates & DragDropKeyStates.ControlKey) != 0 || Native.IsControlDown()) return true;
+        // External file drops default to safe copy (preserving source files); hold Shift to move.
         if ((keyStates & DragDropKeyStates.ShiftKey) != 0 || Native.IsShiftDown()) return false;
-        var first = files.FirstOrDefault(f => !string.IsNullOrWhiteSpace(f));
-        if (string.IsNullOrWhiteSpace(first)) return false;
-        var srcRoot = Path.GetPathRoot(Path.GetFullPath(first));
-        var dstRoot = Path.GetPathRoot(Path.GetFullPath(destDir));
-        return !string.IsNullOrWhiteSpace(srcRoot) && !string.IsNullOrWhiteSpace(dstRoot) && !string.Equals(srcRoot, dstRoot, StringComparison.OrdinalIgnoreCase);
+        return true;
     }
     internal bool AutoHideBlocked => InternalDropProtected || ExternalFileDragActive || (DrawerPinned && Drawer?.IsVisible == true);
     internal bool InternalDropProtected => internalDropInProgress || Environment.TickCount64 < suppressAutoHideUntilTick;
@@ -425,7 +421,7 @@ internal sealed class Controller : IDisposable
         wake.Tick+=(_,_)=> { wake.Stop();Native.GetCursorPos(out var p);T("wake");Pointer(p); };
         leave.Interval = TimeSpan.FromMilliseconds(200);
         leave.Tick += (_, _) => { leave.Stop(); CheckDockLeave(); };
-        refresh.Interval=TimeSpan.FromMilliseconds(150);refresh.Tick+=(_,_)=> { refresh.Stop();if(disposed)return;CheckFullscreen();if(Dock.IsVisible)Dock.UpdateDots(); };
+        refresh.Interval=TimeSpan.FromMilliseconds(150);refresh.Tick+=(_,_)=> { refresh.Stop();if(disposed)return;if(dockMotion.Running||drawerMotion.Running){refresh.Start();return;}CheckFullscreen();if(Dock.IsVisible)Dock.UpdateDots(); };
         syncDebounce.Interval=TimeSpan.FromMilliseconds(450);syncDebounce.Tick+=(_,_)=> { syncDebounce.Stop();SyncDesktop(); };
         safetySync.Interval=TimeSpan.FromMinutes(5);safetySync.Tick+=(_,_)=> { if(!InternalDragging)SyncDesktop(); };
         suppressPoll.Interval=TimeSpan.FromMilliseconds(40);suppressPoll.Tick+=(_,_)=>PollSuppressWakeKey();
@@ -999,10 +995,15 @@ internal sealed class Controller : IDisposable
         try{using var p=Process.GetCurrentProcess();savedProcPriority=p.PriorityClass;if(savedProcPriority!=ProcessPriorityClass.High&&savedProcPriority!=ProcessPriorityClass.RealTime)p.PriorityClass=ProcessPriorityClass.High;}catch{}
         try{savedThreadPriority=Thread.CurrentThread.Priority;if(savedThreadPriority<ThreadPriority.Highest)Thread.CurrentThread.Priority=ThreadPriority.Highest;}catch{}
     }
+    internal void SetWaveBoost(bool active)
+    {
+        if (active) BeginAnimationBoost();
+        else EndAnimationBoost();
+    }
     void EndAnimationBoost(bool force=false)
     {
         if(!animBoostActive)return;
-        if(!force&&(dockMotion.Running||drawerMotion.Running))return;
+        if(!force&&(dockMotion.Running||drawerMotion.Running||Dock.WaveRunning))return;
         animBoostActive=false;
         try{Thread.CurrentThread.Priority=savedThreadPriority;}catch{}
         try{using var p=Process.GetCurrentProcess();p.PriorityClass=savedProcPriority;}catch{}
@@ -1019,6 +1020,19 @@ internal sealed class Controller : IDisposable
         if(!Dock.IsVisible)
         {
             Dock.BeginWake();dockMotion.Snap(reduced?1:0);MoveDock(dockRect.Top);Dock.Show();dockShowing=true;
+            dockToken=++dockEpoch;
+            if(reduced){dockMotion.Snap(1);CompleteDockMotion(true);return;}
+            int token=dockToken;
+            EventHandler? onFirstFrame=null;
+            onFirstFrame=(_,_)=>
+            {
+                CompositionTarget.Rendering-=onFirstFrame;
+                if(disposed||dockHiding||dockToken!=token||!Dock.IsVisible)return;
+                BeginAnimationBoost();
+                dockMotion.To(true);
+            };
+            CompositionTarget.Rendering+=onFirstFrame;
+            return;
         }
         dockToken=++dockEpoch;if(reduced){dockMotion.Snap(1);CompleteDockMotion(true);}else{BeginAnimationBoost();dockMotion.To(true);}
     }
@@ -1362,34 +1376,57 @@ internal sealed class Controller : IDisposable
         var worker = new Thread(() =>
         {
             bool ok = false;
+            int succeeded = 0, failed = 0;
+            var beforeEntries = new HashSet<string>(Directory.EnumerateFileSystemEntries(destDir), StringComparer.OrdinalIgnoreCase);
             try
             {
                 ok = copy
                     ? ShellOps.Copy(valid, destDir, ownerHwnd, quiet: skipDesktop)
                     : ShellOps.Move(valid, destDir, ownerHwnd, quiet: skipDesktop);
+                if (ok) succeeded = valid.Length;
+                else if (valid.Length > 1)
+                {
+                    foreach (var item in valid)
+                    {
+                        var single = new[] { item };
+                        bool itemOk = copy
+                            ? ShellOps.Copy(single, destDir, ownerHwnd, quiet: skipDesktop)
+                            : ShellOps.Move(single, destDir, ownerHwnd, quiet: skipDesktop);
+                        if (itemOk) succeeded++; else failed++;
+                    }
+                    ok = succeeded > 0;
+                }
+                else failed = valid.Length;
             }
             catch (Exception ex) { Program.Log(ex); }
+            var newItems = Directory.EnumerateFileSystemEntries(destDir).Where(p => !beforeEntries.Contains(p)).ToList();
             appDispatcher.BeginInvoke(() =>
             {
                 try
                 {
                     if (!ok)
                     {
-                        Notify("投递到桌面未完成或已取消。", false);
+                        Notify("存入抽屉未完成或已取消。", false);
                         return;
                     }
-                    var landed = new List<string>();
+                    if (failed > 0)
+                        Notify($"已存入 {succeeded} 项，{failed} 项未完成（权限不足或已取消）。", true);
+                    var landed = new List<string>(newItems);
                     foreach (var src in valid)
                     {
                         var destPath = Path.Combine(destDir, Path.GetFileName(src));
-                        if (File.Exists(destPath) || Directory.Exists(destPath))
-                        {
+                        if ((File.Exists(destPath) || Directory.Exists(destPath)) && !landed.Contains(destPath, StringComparer.OrdinalIgnoreCase))
                             landed.Add(destPath);
-                            if (OverrideDesktopFolder != null && !Store.Data.Entries.Any(x => string.Equals(x.Path, destPath, StringComparison.OrdinalIgnoreCase)))
+                    }
+                    if (OverrideDesktopFolder != null)
+                    {
+                        foreach (var destPath in landed)
+                        {
+                            if (!Store.Data.Entries.Any(x => string.Equals(x.Path, destPath, StringComparison.OrdinalIgnoreCase)))
                                 Store.Data.Entries.Add(new Entry { Path = destPath, Name = Path.GetFileNameWithoutExtension(destPath), Source = "desktop", AutoName = false });
                         }
+                        Store.Save();
                     }
-                    if (OverrideDesktopFolder != null) Store.Save();
                     SyncDesktopNow();
                     Dock.Rebuild();
                     Drawer?.Render();

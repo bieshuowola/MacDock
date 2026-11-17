@@ -69,6 +69,7 @@ internal sealed class DrawerWindow : GlassWindow
     internal void SetEntranceScale(double value){entrance.ScaleX=value;entrance.ScaleY=value;}
     GenieVisual? genie;
     Border? bakedGenieSurface;
+    readonly RectangleGeometry stageClipGeometry = new();
     RenderTargetBitmap? prebakedBitmap;
     bool prebakedDirty = true, prebakeQueued, windowClosed;
     double prebakedWidth, prebakedHeight, prebakedScale;
@@ -141,7 +142,8 @@ internal sealed class DrawerWindow : GlassWindow
         var hostPose = !deforming ? pose : (prevDeformPose ?? pose);
         prevDeformPose = pose;
         deforming=true;CurrentPose=pose;SetMaterialGenie(hostPose);
-        stage.Clip=new RectangleGeometry(new Rect(-MaterialInset,0,PanelWidth+2*MaterialInset,Math.Max(0,pose.Row(1).Y-0.5)));
+        stageClipGeometry.Rect=new Rect(-MaterialInset,0,PanelWidth+2*MaterialInset,Math.Max(0,pose.Row(1).Y-0.5));
+        if(!ReferenceEquals(stage.Clip,stageClipGeometry))stage.Clip=stageClipGeometry;
         owner.DrawerLayerFrame?.Invoke("begin-after-resize",MaterialSnapshot);
         if(!meshAttached&&Surface!=null)
         {

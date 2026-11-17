@@ -62,17 +62,17 @@ internal sealed class DockWindow : GlassWindow
         Content = Surface;
         Height = c.Layout.DockHeight;
         DragEnter += BlankOver; DragOver += BlankOver; Drop += BlankDrop;
-        Native.DropPreviewHelper.AttachWindow(this, () => { mouseInhibited = false; if (owner.Drawer?.IsVisible != true) owner.SetExternalFileDrag(false); });
-        PreviewDragEnter+=(_,a)=> { if(a.Data.GetDataPresent(DataFormats.FileDrop)&&!a.Data.GetDataPresent("MacDock.Entry"))owner.SetExternalFileDrag(true); if(!mouseInhibited){mouseInhibited=true;ResetMagnification();} };
+        Native.DropPreviewHelper.AttachWindow(this, () => { mouseInhibited = false; ClearDropVisual(); if (owner.Drawer?.IsVisible != true) owner.SetExternalFileDrag(false); });
+        PreviewDragEnter+=(_,a)=> { if(IsExternalFileDrop(a))owner.SetExternalFileDrag(true); if(!mouseInhibited){mouseInhibited=true;ResetMagnification();} };
         PreviewDragLeave+=(_,_)=> {Native.GetCursorPos(out var p);if(!Contains(p)&&!owner.InternalDragging)mouseInhibited=false;if(((Native.GetAsyncKeyState(1)|Native.GetAsyncKeyState(2))&0x8000)==0&&owner.Drawer?.IsVisible!=true)owner.SetExternalFileDrag(false);};
-        PreviewDrop+=(_,_)=>{mouseInhibited=false;owner.SetExternalFileDrag(false);};
+        PreviewDrop+=(_,_)=>{mouseInhibited=false;ClearDropVisual();owner.SetExternalFileDrag(false);};
         ContextMenu = c.GeneralMenu();
         TrackDockMenu(ContextMenu);
         ContextMenuOpening += PrepareMenuOwner;
         MouseMove += (_, _) => { if(Native.GetCursorPos(out var p)) ObservePointer(p); };
         MouseLeave += (_, _) => { if(Native.GetCursorPos(out var p)) ObservePointer(p); };
         items.SizeChanged += (_, _) => { RefreshGeometry(); EnsureWave(); };
-        IsVisibleChanged += (_, _) => { if (!IsVisible) {wakePointer=null;ResetMagnification();CancelTip();EndKeyboard();ClearDockSelection();ClearDoubleClickState();} };
+        IsVisibleChanged += (_, _) => { if (!IsVisible) {wakePointer=null;ResetMagnification();CancelTip();ClearDropVisual();EndKeyboard();ClearDockSelection();ClearDoubleClickState();} };
         Focusable=true;
         PreviewKeyDown+=OnDockKey;
         Deactivated+=(_,_)=>{if(KeyboardActive){EndKeyboard();owner.DockKeyboardEnded();}};
@@ -86,6 +86,12 @@ internal sealed class DockWindow : GlassWindow
         // WPF's system tooltip fade keeps its HWND alive for another 150ms on close.
         // Configure only this tooltip's public Popup host; never change system settings.
         labelTip.Opened+=(_,_)=>{if(labelTip.Parent is System.Windows.Controls.Primitives.Popup popup)popup.PopupAnimation=System.Windows.Controls.Primitives.PopupAnimation.None;};
+        dropHintTip.Opened+=(_,_)=>
+        {
+            if(dropHintTip.Parent is System.Windows.Controls.Primitives.Popup popup)popup.PopupAnimation=System.Windows.Controls.Primitives.PopupAnimation.None;
+            if(System.Windows.PresentationSource.FromVisual(dropHintTip) is System.Windows.Interop.HwndSource src && Native.FindActiveSysDragImage() is nint di && di!=0)
+                Native.DeferWindowPosAsync(src.Handle,di,0,0,0,0,0x0003);
+        };
         Rebuild();
     }
     public override void RefreshMaterial(){base.RefreshMaterial();if(Surface is not Border surface)return;if(MaterialAvailable)glassTint.SetResourceReference(Border.BackgroundProperty,"GlassSurface");else glassTint.Background=surface.Background;surface.Background=Brushes.Transparent;SetReveal(reveal);}
@@ -387,11 +393,10 @@ internal sealed class DockWindow : GlassWindow
             }
             owner.GatewayCaptureEnded(released: true);
         };
-        root.AllowDrop=true;var hover=new DispatcherTimer{Interval=TimeSpan.FromMilliseconds(550)};
-        hover.Tick+=(_,_)=>{hover.Stop();if(owner.Drawer?.IsVisible!=true)owner.ToggleDrawer();};
-        root.DragEnter+=(_,a)=>{if(a.Data.GetDataPresent(DataFormats.FileDrop)){hover.Start();if(!a.Data.GetDataPresent("MacDock.Entry")){var files=(string[])a.Data.GetData(DataFormats.FileDrop);var destDir=owner.OverrideDesktopFolder??Desktop.UserFolder;bool copy=Controller.ShouldCopyToDirectory(files,destDir,a.KeyStates);a.Effects=copy?DragDropEffects.Copy:DragDropEffects.Move;}else a.Effects=DragDropEffects.None;a.Handled=true;}};
-        root.DragOver+=(_,a)=>{if(a.Data.GetDataPresent(DataFormats.FileDrop)&&!a.Data.GetDataPresent("MacDock.Entry")){var files=(string[])a.Data.GetData(DataFormats.FileDrop);var destDir=owner.OverrideDesktopFolder??Desktop.UserFolder;bool copy=Controller.ShouldCopyToDirectory(files,destDir,a.KeyStates);a.Effects=copy?DragDropEffects.Copy:DragDropEffects.Move;}else a.Effects=DragDropEffects.None;a.Handled=true;};
-        root.DragLeave+=(_,_)=>hover.Stop();root.Drop+=(_,a)=>{hover.Stop();if(a.Data.GetDataPresent(DataFormats.FileDrop)&&!a.Data.GetDataPresent("MacDock.Entry")){var files=(string[])a.Data.GetData(DataFormats.FileDrop);var destDir=owner.OverrideDesktopFolder??Desktop.UserFolder;bool copy=Controller.ShouldCopyToDirectory(files,destDir,a.KeyStates);owner.DropFilesToDesktop(files,copy);a.Effects=copy?DragDropEffects.Copy:DragDropEffects.Move;}else a.Effects=DragDropEffects.None;a.Handled=true;};root.Unloaded+=(_,_)=>hover.Stop();
+        root.AllowDrop=true;
+        root.DragEnter+=(_,a)=>{if(IsExternalFileDrop(a)){a.Effects=ResolveExternalDropEffect(a,out bool _);SetDropVisual("松开放入抽屉",true);a.Handled=true;}else if(a.Data.GetDataPresent(DataFormats.FileDrop)){a.Effects=DragDropEffects.None;a.Handled=true;}};
+        root.DragOver+=(_,a)=>{if(IsExternalFileDrop(a)){a.Effects=ResolveExternalDropEffect(a,out bool _);SetDropVisual("松开放入抽屉",true);a.Handled=true;}else if(a.Data.GetDataPresent(DataFormats.FileDrop)){a.Effects=DragDropEffects.None;a.Handled=true;}};
+        root.Drop+=(_,a)=>{ClearDropVisual();if(IsExternalFileDrop(a)){a.Effects=ResolveExternalDropEffect(a,out bool copy);owner.DropFilesToDesktop((string[])a.Data.GetData(DataFormats.FileDrop),copy);a.Handled=true;}else if(a.Data.GetDataPresent(DataFormats.FileDrop)){a.Effects=DragDropEffects.None;a.Handled=true;}};
         drawerButton = root;
         return root;
     }
@@ -469,11 +474,13 @@ internal sealed class DockWindow : GlassWindow
         root.DragEnter += (_, a) =>
         {
             if(ReorderIntent(a,false)){a.Effects=ReorderEffect(a);a.Handled=true;return;}
-            if (a.Data.GetDataPresent(DataFormats.FileDrop))
+            if (IsExternalFileDrop(a))
             {
-                if(!AcceptsFileDropTarget(e)||!InCenterDropZone(root,a)){Reset();return;}
+                if(!WantsOpenWithApp(a)||!AcceptsFileDropTarget(e)||!InCenterDropZone(root,a)){Reset();return;}
                 Reset(); files = (string[])a.Data.GetData(DataFormats.FileDrop); bridge = new ShellDrop(e.IsVirtual ? e.ShellVerb ?? "" : e.Path, files); Native.GetCursorPos(out var p);
-                a.Effects = (DragDropEffects)bridge.Enter((uint)a.KeyStates, p, (uint)a.AllowedEffects); entered = true; hover.Start(); a.Handled = true;
+                a.Effects = (DragDropEffects)bridge.Enter((uint)a.KeyStates & ~32u, p, (uint)a.AllowedEffects); entered = true; hover.Start();
+                SetDropVisual(System.IO.Directory.Exists(e.Path) ? $"松开移入「{e.Name}」" : $"松开用「{e.Name}」打开", false);
+                a.Handled = true;
             }
         };
         root.DragOver += (_, a) =>
@@ -482,7 +489,18 @@ internal sealed class DockWindow : GlassWindow
             {
                 a.Effects = ReorderEffect(a); a.Handled = true; return;
             }
-            if (files != null && bridge != null) { Native.GetCursorPos(out var p); a.Effects = (DragDropEffects)bridge.Over((uint)a.KeyStates, p, (uint)a.AllowedEffects); a.Handled = true; }
+            if (IsExternalFileDrop(a) && !WantsOpenWithApp(a))
+            {
+                if (entered) Reset();
+                return;
+            }
+            if (files != null && bridge != null)
+            {
+                Native.GetCursorPos(out var p);
+                a.Effects = (DragDropEffects)bridge.Over((uint)a.KeyStates & ~32u, p, (uint)a.AllowedEffects);
+                SetDropVisual(System.IO.Directory.Exists(e.Path) ? $"松开移入「{e.Name}」" : $"松开用「{e.Name}」打开", false);
+                a.Handled = true;
+            }
         };
         root.DragLeave += (_, _) => { Reset(); };
         root.Drop += (_, a) =>
@@ -491,19 +509,21 @@ internal sealed class DockWindow : GlassWindow
             {
                 var scope=owner.Store.PinnedEntries().Select(x=>x.Id).ToArray();owner.CommitSort(scope,(string)a.Data.GetData("MacDock.Entry"),Array.IndexOf(scope,e.Id),true);a.Effects = ReorderEffect(a); a.Handled = true; return;
             }
-            if (a.Data.GetDataPresent(DataFormats.FileDrop))
+            if (IsExternalFileDrop(a))
             {
-                if(!AcceptsFileDropTarget(e)||!InCenterDropZone(root,a)){Reset();return;}
+                if(!WantsOpenWithApp(a)||!AcceptsFileDropTarget(e)||!InCenterDropZone(root,a)){Reset();return;}
+                ClearDropVisual();
                 bool keepDrawer = false && !ShellDrop.IsExecutableTarget(e.Path);
                 if (keepDrawer) owner.BeginInternalDropProtection();
                 owner.Busy = true;
                 try
                 {
                     Native.GetCursorPos(out var p);
-                    if (!entered) { files = (string[])a.Data.GetData(DataFormats.FileDrop); bridge = new ShellDrop(e.IsVirtual ? e.ShellVerb ?? "" : e.Path, files); bridge.Enter((uint)a.KeyStates, p, (uint)a.AllowedEffects); }
-                    var effect = bridge?.Drop((uint)a.KeyStates, p, (uint)a.AllowedEffects) ?? 0;
+                    uint shellKeys = (uint)a.KeyStates & ~32u;
+                    if (!entered) { files = (string[])a.Data.GetData(DataFormats.FileDrop); bridge = new ShellDrop(e.IsVirtual ? e.ShellVerb ?? "" : e.Path, files); bridge.Enter(shellKeys, p, (uint)a.AllowedEffects); }
+                    var effect = bridge?.Drop(shellKeys, p, (uint)a.AllowedEffects) ?? 0;
                     a.Effects = (DragDropEffects)effect;
-                    if (effect == 0) owner.Notify("此目标未接受文件。可悬停激活运行窗口，再继续拖入窗口。", false);
+                    if (effect == 0) owner.Notify("此目标未接受文件。可按住 Alt 悬停激活运行窗口后再投递。", false);
                 }
                 catch (Exception ex) { owner.Notify("拖放未完成：" + ex.Message); a.Effects = DragDropEffects.None; }
                 finally { owner.SetExternalFileDrag(false); Reset(); if (keepDrawer) owner.EndInternalDropProtection(true); owner.Busy = false; }
@@ -640,16 +660,28 @@ internal sealed class DockWindow : GlassWindow
         ApplyTransforms();
     }
 
+    double[] computeScales = Array.Empty<double>();
+    double[] computeLefts = Array.Empty<double>();
+    Native.Point lastWaveCheckPt;
+    bool lastWaveHit;
+    int waveCheckTick;
     void EnsureWave()
     {
         if (mouseInhibited) return;
-        if (!pointerInside && currentScale.All(s => Math.Abs(s - 1) < .002) && currentLeft.Select((x, i) => Math.Abs(x - layout[i].Left)).All(d => d < .25))
+        if (!pointerInside)
         {
-            if (running) { StopWave(); ApplyRest(); }
-            return;
+            bool atRest = true;
+            for (int i = 0; i < currentScale.Length; i++)
+                if (Math.Abs(currentScale[i] - 1) >= .002 || Math.Abs(currentLeft[i] - layout[i].Left) >= .25) { atRest = false; break; }
+            if (atRest)
+            {
+                if (running) { StopWave(); ApplyRest(); }
+                return;
+            }
         }
         if (running) return;
-        running = true; lastFrame = Stopwatch.GetTimestamp();
+        running = true; lastFrame = Stopwatch.GetTimestamp(); waveCheckTick = 0;
+        owner.SetWaveBoost(true);
         System.Windows.Media.CompositionTarget.Rendering += OnFrame;
     }
 
@@ -659,18 +691,36 @@ internal sealed class DockWindow : GlassWindow
         // authoritative; a missing routed event must not disable the wave forever.
         if(mouseInhibited&&!owner.InternalDragging&&(Native.GetAsyncKeyState(1)&0x8000)==0)mouseInhibited=false;
         ObserveTip(p,allow);
-        bool inside=allow && WaveHit(p);
+        bool inside=allow && WaveHit(p, forceHwndCheck: true);
         if(inside) pointerX=items.PointFromScreen(new Point(p.X,p.Y)).X;
         if(pointerInside==inside && !inside && !running)return;
         pointerInside=inside;EnsureWave();
     }
-    bool WaveHit(Native.Point p)
+    bool WaveHit(Native.Point p, bool forceHwndCheck = false)
     {
         if(!IsVisible||wakePointer!=null||mouseInhibited||owner.InternalDragging||owner.MenuOpen||owner.Busy
-            ||owner.Store.Data.ReducedMotion||!Anim.Allowed||!Native.GetWindowRect(Handle,out var r)||!r.Contains(p)||Native.WindowFromPoint(p)!=Handle)return false;
-        var apps=layout.Where(i=>i.Entry!=null).ToArray();if(apps.Length==0)return false;
+            ||owner.Store.Data.ReducedMotion||!Anim.Allowed||!Native.GetWindowRect(Handle,out var r)||!r.Contains(p))
+        {
+            lastWaveHit=false;return false;
+        }
+        bool samePt=p.X==lastWaveCheckPt.X&&p.Y==lastWaveCheckPt.Y;
+        if(forceHwndCheck||!samePt||(waveCheckTick++&3)==0)
+        {
+            lastWaveCheckPt=p;
+            lastWaveHit=Native.WindowFromPoint(p)==Handle;
+        }
+        if(!lastWaveHit)return false;
+        double minLeft=double.MaxValue,maxRight=double.MinValue;
+        for(int i=0;i<layout.Count;i++)
+        {
+            if(layout[i].Entry==null)continue;
+            if(layout[i].Left<minLeft)minLeft=layout[i].Left;
+            double right=layout[i].Left+layout[i].Width;
+            if(right>maxRight)maxRight=right;
+        }
+        if(minLeft>maxRight)return false;
         var point=items.PointFromScreen(new Point(p.X,p.Y));
-        return point.X>=apps[0].Left && point.X<=apps[^1].Left+apps[^1].Width;
+        return point.X>=minLeft && point.X<=maxRight;
     }
 
     void StopWave()
@@ -678,6 +728,7 @@ internal sealed class DockWindow : GlassWindow
         if (!running) return;
         running = false;
         System.Windows.Media.CompositionTarget.Rendering -= OnFrame;
+        owner.SetWaveBoost(false);
     }
 
     void ResetMagnification()
@@ -719,24 +770,35 @@ internal sealed class DockWindow : GlassWindow
 
         if (!pointerInside || mouseInhibited)
         {
-            for (var i = 0; i < currentScale.Length; i++) currentScale[i] += (1 - currentScale[i]) * Ease(dt);
-            for (var i = 0; i < currentLeft.Length; i++) currentLeft[i] += (layout[i].Left - currentLeft[i]) * Ease(dt);
+            double ease = Ease(dt);
+            for (var i = 0; i < currentScale.Length; i++) currentScale[i] += (1 - currentScale[i]) * ease;
+            for (var i = 0; i < currentLeft.Length; i++) currentLeft[i] += (layout[i].Left - currentLeft[i]) * ease;
         }
         else
         {
             var (lefts, scales) = Compute();
+            double ease = Ease(dt);
+            bool settled = true;
             for (var i = 0; i < currentScale.Length; i++)
             {
-                currentScale[i] += (scales[i] - currentScale[i]) * Ease(dt);
-                currentLeft[i] += (lefts[i] - currentLeft[i]) * Ease(dt);
+                currentScale[i] += (scales[i] - currentScale[i]) * ease;
+                currentLeft[i] += (lefts[i] - currentLeft[i]) * ease;
+                if (Math.Abs(currentScale[i] - scales[i]) >= .0015 || Math.Abs(currentLeft[i] - lefts[i]) >= .2) settled = false;
             }
-            if(currentScale.Select((s,i)=>Math.Abs(s-scales[i])).All(d=>d<.0015) && currentLeft.Select((x,i)=>Math.Abs(x-lefts[i])).All(d=>d<.2))
-            { currentScale=scales;currentLeft=lefts;ApplyTransforms();StopWave();return; }
+            if (settled)
+            {
+                Array.Copy(scales, currentScale, currentScale.Length);
+                Array.Copy(lefts, currentLeft, currentLeft.Length);
+                ApplyTransforms(); StopWave(); return;
+            }
         }
         ApplyTransforms();
-        if (!pointerInside && currentScale.All(s => Math.Abs(s - 1) < .0015) && currentLeft.Select((x, i) => Math.Abs(x - layout[i].Left)).All(d => d < .2))
+        if (!pointerInside)
         {
-            StopWave(); ApplyRest();
+            bool atRest = true;
+            for (var i = 0; i < currentScale.Length; i++)
+                if (Math.Abs(currentScale[i] - 1) >= .0015 || Math.Abs(currentLeft[i] - layout[i].Left) >= .2) { atRest = false; break; }
+            if (atRest) { StopWave(); ApplyRest(); }
         }
     }
 
@@ -745,8 +807,9 @@ internal sealed class DockWindow : GlassWindow
     (double[] Lefts, double[] Scales) Compute()
     {
         var n = layout.Count;
-        var scales = new double[n];
-        var lefts = new double[n];
+        if (computeScales.Length != n) { computeScales = new double[n]; computeLefts = new double[n]; }
+        var scales = computeScales;
+        var lefts = computeLefts;
         var slot=Math.Max(24,owner.Layout.DockTile);
         for (var i = 0; i < n; i++)
         {
@@ -870,12 +933,109 @@ internal sealed class DockWindow : GlassWindow
         return new Native.Point((int)p.X, (int)p.Y);
     }
 
-    void BlankOver(object? s, DragEventArgs a) { if (a.Handled) return; if (a.Data.GetDataPresent(DataFormats.FileDrop)) { bool ext=!a.Data.GetDataPresent("MacDock.Entry"); if(ext){ var files=(string[])a.Data.GetData(DataFormats.FileDrop); var destDir=owner.OverrideDesktopFolder??Desktop.UserFolder; bool copy=Controller.ShouldCopyToDirectory(files,destDir,a.KeyStates); a.Effects=copy?DragDropEffects.Copy:DragDropEffects.Move; } else a.Effects=DragDropEffects.Link; a.Handled = true; } else if(a.Data.GetDataPresent(DataFormats.Bitmap)){ a.Effects=DragDropEffects.Copy; a.Handled=true; } }
+    readonly ToolTip dropHintTip = new() { Placement = System.Windows.Controls.Primitives.PlacementMode.Top, StaysOpen = true, IsHitTestVisible = false, MaxWidth = 360 };
+    string activeDropHint = "";
+    bool dropGatewayHighlighted;
+    internal bool DropHintVisible => dropHintTip.IsOpen;
+    internal string DropHintText => activeDropHint;
+    void SetDropVisual(string hint, bool highlightGateway)
+    {
+        if (drawerButton != null && dropGatewayHighlighted != highlightGateway)
+        {
+            dropGatewayHighlighted = highlightGateway;
+            drawerButton.Background = highlightGateway ? Theme.FillHover : Brushes.Transparent;
+            drawerButton.BorderBrush = highlightGateway ? (TryFindResource("Hairline") as Brush ?? Theme.FillHover) : Brushes.Transparent;
+        }
+        if (activeDropHint == hint && dropHintTip.IsOpen) return;
+        activeDropHint = hint;
+        var text = Theme.Text(hint, 12.5);
+        dropHintTip.Content = text;
+        dropHintTip.PlacementTarget = this;
+        double anchorX = ActualWidth / 2;
+        if (highlightGateway && drawerButton != null && drawerButton.ActualWidth > 0)
+        {
+            var g = drawerButton.TranslatePoint(new Point(drawerButton.ActualWidth / 2, 0), this);
+            anchorX = g.X;
+        }
+        dropHintTip.PlacementRectangle = new Rect(anchorX, 0, 0, 0);
+        dropHintTip.Measure(new Size(double.PositiveInfinity, double.PositiveInfinity));
+        dropHintTip.HorizontalOffset = -dropHintTip.DesiredSize.Width / 2;
+        dropHintTip.VerticalOffset = -10 * owner.Layout.Unit;
+        dropHintTip.IsOpen = true;
+    }
+    void ClearDropVisual()
+    {
+        activeDropHint = "";
+        if (dropHintTip.IsOpen) dropHintTip.IsOpen = false;
+        if (drawerButton != null && dropGatewayHighlighted)
+        {
+            dropGatewayHighlighted = false;
+            drawerButton.Background = Brushes.Transparent;
+            drawerButton.BorderBrush = Brushes.Transparent;
+        }
+    }
+
+    static bool IsExternalFileDrop(DragEventArgs a) => a.Data.GetDataPresent(DataFormats.FileDrop) && !a.Data.GetDataPresent("MacDock.Entry");
+    static bool WantsOpenWithApp(DragEventArgs a) => (a.KeyStates & DragDropKeyStates.AltKey) != 0 || (Native.GetAsyncKeyState(0x12) & 0x8000) != 0;
+    DragDropEffects ResolveExternalDropEffect(DragEventArgs a, out bool copy)
+    {
+        var files = (string[])a.Data.GetData(DataFormats.FileDrop);
+        var destDir = owner.OverrideDesktopFolder ?? Desktop.UserFolder;
+        copy = Controller.ShouldCopyToDirectory(files, destDir, a.KeyStates);
+        if (copy)
+        {
+            if ((a.AllowedEffects & DragDropEffects.Copy) != 0) return DragDropEffects.Copy;
+            if ((a.AllowedEffects & DragDropEffects.Move) != 0) { copy = false; return DragDropEffects.Move; }
+            return DragDropEffects.None;
+        }
+        if ((a.AllowedEffects & DragDropEffects.Move) != 0) return DragDropEffects.Move;
+        if ((a.AllowedEffects & DragDropEffects.Copy) != 0) { copy = true; return DragDropEffects.Copy; }
+        return DragDropEffects.None;
+    }
+
+    void BlankOver(object? s, DragEventArgs a)
+    {
+        if (a.Handled) return;
+        if (IsExternalFileDrop(a))
+        {
+            a.Effects = ResolveExternalDropEffect(a, out _);
+            SetDropVisual("松开放入抽屉", true);
+            a.Handled = true;
+        }
+        else if (a.Data.GetDataPresent(DataFormats.FileDrop))
+        {
+            a.Effects = DragDropEffects.Link;
+            a.Handled = true;
+        }
+        else if (a.Data.GetDataPresent(DataFormats.Bitmap))
+        {
+            a.Effects = DragDropEffects.Copy;
+            SetDropVisual("松开保存图片到抽屉", true);
+            a.Handled = true;
+        }
+    }
     void BlankDrop(object? s, DragEventArgs a)
     {
-        if(a.Handled)return;
-        if(a.Data.GetDataPresent("MacDock.Entry")){var entry=owner.Store.Data.Entries.FirstOrDefault(e=>e.Id==(string)a.Data.GetData("MacDock.Entry"));if(entry!=null)owner.SetPinned(new[]{entry},true);a.Effects=DragDropEffects.Link;a.Handled=true;return;}
-        if (a.Data.GetDataPresent(DataFormats.FileDrop)) { var files=(string[])a.Data.GetData(DataFormats.FileDrop); var destDir=owner.OverrideDesktopFolder??Desktop.UserFolder; bool copy=Controller.ShouldCopyToDirectory(files,destDir,a.KeyStates); owner.DropFilesToDesktop(files, copy); a.Effects = copy ? DragDropEffects.Copy : DragDropEffects.Move; a.Handled = true; } else if (a.Data.GetDataPresent(DataFormats.Bitmap)) { owner.SaveDroppedBitmapToDesktop(a.Data); a.Effects = DragDropEffects.Copy; a.Handled = true; }
+        if (a.Handled) return;
+        ClearDropVisual();
+        if (a.Data.GetDataPresent("MacDock.Entry"))
+        {
+            var entry = owner.Store.Data.Entries.FirstOrDefault(e => e.Id == (string)a.Data.GetData("MacDock.Entry"));
+            if (entry != null) owner.SetPinned(new[] { entry }, true);
+            a.Effects = DragDropEffects.Link; a.Handled = true; return;
+        }
+        if (IsExternalFileDrop(a))
+        {
+            var files = (string[])a.Data.GetData(DataFormats.FileDrop);
+            a.Effects = ResolveExternalDropEffect(a, out bool copy);
+            if (a.Effects != DragDropEffects.None) owner.DropFilesToDesktop(files, copy);
+            a.Handled = true;
+        }
+        else if (a.Data.GetDataPresent(DataFormats.Bitmap))
+        {
+            owner.SaveDroppedBitmapToDesktop(a.Data);
+            a.Effects = DragDropEffects.Copy; a.Handled = true;
+        }
     }
     static DragDropEffects ReorderEffect(DragEventArgs a)=>(a.AllowedEffects&DragDropEffects.Move)!=0?DragDropEffects.Move:DragDropEffects.Link;
     static bool InCenterDropZone(FrameworkElement tile, DragEventArgs a) { var p = a.GetPosition(tile); double w = tile.ActualWidth, h = tile.ActualHeight; return w > 0 && h > 0 && Math.Abs(p.X - w * 0.5) <= w * 0.325 && Math.Abs(p.Y - h * 0.5) <= h * 0.325; }
