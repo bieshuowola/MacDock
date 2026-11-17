@@ -137,7 +137,7 @@ internal sealed class DrawerWindow : GlassWindow
         if(!deforming)ConfigureSurfaceGeometry(1, clipToStage: !shareShadow);
         var hostPose = !deforming ? pose : (prevDeformPose ?? pose);
         prevDeformPose = pose;
-        deforming=true;CurrentPose=pose;SetMaterialGenie(pose.Progress>=1?null:hostPose);
+        deforming=true;CurrentPose=pose;SetMaterialGenie(hostPose);
         owner.DrawerLayerFrame?.Invoke("begin-after-resize",MaterialSnapshot);
         if(!meshAttached&&Surface!=null)
         {

@@ -71,7 +71,7 @@ internal sealed class SoftContour:FrameworkElement
         if(camera.Width!=Width||camera.Position.Y!=Height/2){camera.Position=new System.Windows.Media.Media3D.Point3D(Width/2,Height/2,10);camera.LookDirection=new System.Windows.Media.Media3D.Vector3D(0,0,-1);camera.UpDirection=new System.Windows.Media.Media3D.Vector3D(0,1,0);camera.Width=Width;}
         List<Point> points;
         if(pose==null){
-            var r=sheet;r.Offset(Pad,Pad+4);
+            var r=sheet;r.Offset(Pad,Pad);
             double rx=Math.Clamp(radius,0,Math.Min(r.Width,r.Height)/2);
             const int arcSteps=24;
             points=new List<Point>(arcSteps*4+4);
@@ -87,10 +87,9 @@ internal sealed class SoftContour:FrameworkElement
             }
         }
         else{
-            double dy=4*GeniePose.Smooth((pose.Progress-.85)/.15);
             points=new List<Point>((GeniePose.Rows+1)*2);
-            for(int i=0;i<=GeniePose.Rows;i++){var row=pose.Row(GeniePose.RowT(i),true);points.Add(new Point(row.Left+Pad,row.Y+Pad+dy));}
-            for(int i=GeniePose.Rows;i>=0;i--){var row=pose.Row(GeniePose.RowT(i),true);points.Add(new Point(row.Right+Pad,row.Y+Pad+dy));}
+            for(int i=0;i<=GeniePose.Rows;i++){var row=pose.Row(GeniePose.RowT(i),true);points.Add(new Point(row.Left+Pad,row.Y+Pad));}
+            for(int i=GeniePose.Rows;i>=0;i--){var row=pose.Row(GeniePose.RowT(i),true);points.Add(new Point(row.Right+Pad,row.Y+Pad));}
         }
         for(int i=points.Count-1;i>0;i--)if((points[i]-points[i-1]).Length<.001)points.RemoveAt(i);
         if(points.Count>2&&(points[0]-points[^1]).Length<.001)points.RemoveAt(points.Count-1);
