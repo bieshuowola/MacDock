@@ -683,7 +683,13 @@ internal static class ExperienceChecks
             if(refreshHz<160)throw new InvalidOperationException($"Expected >=160Hz (165Hz) display refresh rate, got {refreshHz}Hz on {c.Screen.DeviceName}");
             double frameBudgetMs=1000.0/Math.Max(60,refreshHz);
             backdrop=new Window{Title="MacDock 稳定性测试背景",ShowInTaskbar=false,ShowActivated=false,Topmost=false,WindowStyle=WindowStyle.None,ResizeMode=ResizeMode.NoResize,Width=Math.Max(400,(area.Width-40)/c.Scale),Height=Math.Max(300,(area.Height-40)/c.Scale)};
-            backdrop.Content=new Grid{Background=Brushes.White};
+            var stripeGrid=new Grid{Background=Brushes.White};
+            var stripePanel=new StackPanel{Orientation=Orientation.Vertical};
+            var stripeBrush=new SolidColorBrush(Color.FromRgb(120,120,120));
+            stripeBrush.Freeze();
+            for(int sy=0;sy<1400;sy+=14)stripePanel.Children.Add(new Border{Height=3,Margin=new Thickness(0,11,0,0),Background=stripeBrush});
+            stripeGrid.Children.Add(stripePanel);
+            backdrop.Content=stripeGrid;
             backdrop.Loaded+=(_,_)=>Native.SetWindowPos(new System.Windows.Interop.WindowInteropHelper(backdrop).Handle,0,area.Left+20,area.Top+20,Math.Max(400,area.Width-40),Math.Max(300,area.Height-40),0x10);
             backdrop.Show();
 
@@ -724,15 +730,15 @@ internal static class ExperienceChecks
                 if(mode=="open")
                 {
                     openFrames.Add((cycle,phase,fgOpacity,ms));
-                    if(cycle==1&&!midCaptured&&phase>=0.45&&phase<=0.78&&c.Drawer is {IsVisible:true} d&&d.CurrentPose is {} pose)
+                    if(cycle==1&&!midCaptured&&phase>=0.74&&phase<=0.88&&c.Drawer is {IsVisible:true} d&&d.CurrentPose is {} pose)
                     {
                         midCaptured=true;
                         var body=d.BodyBounds;
                         int yBottom=body.Top+(int)Math.Round(pose.Row(1).Y*c.Scale);
                         int capX=Math.Max(area.Left,body.Left-8);
                         int capW=Math.Min(area.Right-capX,(body.Right-body.Left)+16);
-                        int capY=Math.Max(area.Top,yBottom-24);
-                        int capH=Math.Min(area.Bottom-capY,64);
+                        int capY=Math.Max(area.Top,yBottom-60);
+                        int capH=Math.Min(area.Bottom-capY,120);
                         if(capW>20&&capH>20)
                         {
                             using var bmp=new System.Drawing.Bitmap(capW,capH);
@@ -765,11 +771,22 @@ internal static class ExperienceChecks
                                 }
                             }
                             bmp.Save(Path.Combine(Output,"drawer-stability-open-mid.png"),System.Drawing.Imaging.ImageFormat.Png);
-                            int cx=capW/2;
+                            try{bmp.Save(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory),"verify-bottom-edge.png"),System.Drawing.Imaging.ImageFormat.Png);}catch{}
+                            int cx=capW/2+150;
+                            if(Native.GetWindowRect(c.Dock.Handle,out var dockR))
+                                cx=Math.Clamp(dockR.Right+36-capX,10,capW-10);
+                            // Locate actual rendered bottom edge of drawer at cx (last row before background stripes resume)
+                            int renderedBottom=yBottom-capY;
+                            for(int py=Math.Max(15,renderedBottom-30);py<Math.Min(capH-6,renderedBottom+10);py++)
+                            {
+                                var p0=bmp.GetPixel(cx,py);var p1=bmp.GetPixel(cx,py+1);
+                                int l0=(p0.R+p0.G+p0.B)/3,l1=(p1.R+p1.G+p1.B)/3;
+                                if(l0<246&&l1>=248){renderedBottom=py;break;}
+                            }
                             var luma=new List<int>();
                             for(int dy=1;dy<=6;dy++)
                             {
-                                int py=Math.Clamp((yBottom-capY)+dy,0,capH-1);
+                                int py=Math.Clamp(renderedBottom+dy,0,capH-1);
                                 var px=bmp.GetPixel(cx,py);
                                 luma.Add((px.R+px.G+px.B)/3);
                             }
@@ -780,13 +797,14 @@ internal static class ExperienceChecks
                                 if(luma[k]>luma[k-1]+8&&luma[k]>luma[k+1]+8)bottomHaloDetected=true;
                             }
                             var innerLuma=new List<int>();
-                            for(int dy=-12;dy<=2;dy++)
+                            for(int dy=-10;dy<=0;dy++)
                             {
-                                int py=Math.Clamp((yBottom-capY)+dy,0,capH-1);
+                                int py=Math.Clamp(renderedBottom+dy,0,capH-1);
                                 var px=bmp.GetPixel(cx,py);
                                 innerLuma.Add((px.R+px.G+px.B)/3);
                             }
                             bottomEdgeSample+="|in:"+string.Join(",",innerLuma);
+                            if(innerLuma.Any(v=>v<160))bottomHaloDetected=true;
                             for(int k=1;k<innerLuma.Count-1;k++)
                             {
                                 if(innerLuma[k]>innerLuma[k-1]+12&&innerLuma[k]>innerLuma[k+1]+12)bottomHaloDetected=true;

@@ -66,6 +66,7 @@ internal sealed class DrawerWindow : GlassWindow
     internal void SetEntranceScale(double value){entrance.ScaleX=value;entrance.ScaleY=value;}
     GenieVisual? genie;
     bool deforming,meshAttached;double genieWidth,genieHeight,genieFrame;
+    GeniePose? prevDeformPose;
     Layout? appliedLayout;
     double appliedScale;
     readonly Grid stage=new(){ClipToBounds=true};
@@ -134,7 +135,9 @@ internal sealed class DrawerWindow : GlassWindow
         // cached live texture. A second geometry clip would quantize it again.
         var bounds=new Rect(0,0,PanelWidth,PanelHeight);
         if(!deforming)ConfigureSurfaceGeometry(1, clipToStage: !shareShadow);
-        deforming=true;CurrentPose=pose;SetMaterialGenie(pose.Progress>=1?null:pose);
+        var hostPose = !deforming ? pose : (prevDeformPose ?? pose);
+        prevDeformPose = pose;
+        deforming=true;CurrentPose=pose;SetMaterialGenie(pose.Progress>=1?null:hostPose);
         owner.DrawerLayerFrame?.Invoke("begin-after-resize",MaterialSnapshot);
         if(!meshAttached&&Surface!=null)
         {
@@ -176,7 +179,7 @@ internal sealed class DrawerWindow : GlassWindow
         gatewayRibbon.Clear();
         if(genie==null||!deforming)return;
         owner.DrawerLayerFrame?.Invoke("end-before-resize",MaterialSnapshot);
-        deforming=false;CurrentPose=null;
+        deforming=false;CurrentPose=null;prevDeformPose=null;
         contour.Shape(PanelWidth,FrameHeight,MaterialRadius,new Rect(0,0,PanelWidth,PanelHeight),null,1);
         owner.DrawerLayerFrame?.Invoke("end-after-height",MaterialSnapshot);
         SetMaterialGenie(null);
