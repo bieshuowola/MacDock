@@ -304,6 +304,8 @@ internal sealed class DrawerWindow : GlassWindow
     readonly Dictionary<string, Border> tiles = new(StringComparer.Ordinal);
     readonly List<Entry> visibleOrder = new();
     bool renderedListView;
+    double renderedUnit;
+    bool dropPreviewActive;
     Entry? anchor;
     bool updating;
 
@@ -625,6 +627,11 @@ internal sealed class DrawerWindow : GlassWindow
             return 0;
         });
         Deactivated += (_, _) => Dispatcher.BeginInvoke(()=>c.DrawerFocusChanged());
+        DpiChanged += (_, _) => { InvalidateDpiCache(); InvalidatePrebakedSurface(); ApplyLayout(); Render(); };
+        AddHandler(DragDrop.DragEnterEvent, new DragEventHandler((_, a) => { dropPreviewActive = true; Native.DropPreviewHelper.DragEnter(Handle, a); }), true);
+        AddHandler(DragDrop.DragOverEvent, new DragEventHandler((_, a) => { if (!dropPreviewActive) { dropPreviewActive = true; Native.DropPreviewHelper.DragEnter(Handle, a); } else Native.DropPreviewHelper.DragOver(a); }), true);
+        AddHandler(DragDrop.DragLeaveEvent, new DragEventHandler((_, _) => { if (dropPreviewActive && (!Native.GetCursorPos(out var p) || !Contains(p))) { dropPreviewActive = false; Native.DropPreviewHelper.DragLeave(); } }), true);
+        AddHandler(DragDrop.DropEvent, new DragEventHandler((_, a) => { dropPreviewActive = false; Native.DropPreviewHelper.Drop(a); }), true);
         scroll.ScrollChanged += (_, e) => { if (Math.Abs(e.VerticalChange) > 0.1) InvalidatePrebakedSurface(); };
         void OnThemeChanged() => InvalidatePrebakedSurface();
         Theme.Changed += OnThemeChanged;
@@ -647,6 +654,7 @@ internal sealed class DrawerWindow : GlassWindow
         var l = owner.Layout;
         if(l==appliedLayout&&owner.Scale==appliedScale)return;
         if(IsDeforming)owner.SettleDrawerMotion();
+        InvalidateDpiCache();
         appliedLayout=l;appliedScale=owner.Scale;
         Width = Math.Round(l.DrawerWidth*owner.Scale)/owner.Scale+2*MaterialInset; Height = FrameHeight+2*MaterialInset;
         UseFlatSurface();
@@ -657,6 +665,8 @@ internal sealed class DrawerWindow : GlassWindow
         toolbar.Height=l.ToolbarHeight;searchHost.Height=l.SearchHeight;footer.Height=l.FooterHeight;
         gap1.Height=0;gap2.Height=16*l.Unit;gap3.Height=10*l.Unit;
         searchHost.Width=Math.Clamp(PanelWidth-l.Chrome*2-210,0,280);
+        groups.Width = owner.Store.Data.ListView ? double.NaN : Math.Max(0, l.Columns * (l.DrawerTile + l.GapX) - l.GapX);
+        groups.HorizontalAlignment = owner.Store.Data.ListView ? HorizontalAlignment.Stretch : HorizontalAlignment.Center;
         InvalidatePrebakedSurface();
     }
 
@@ -987,12 +997,15 @@ internal sealed class DrawerWindow : GlassWindow
             .Concat(Alphabet.Groups(entries.Where(e => e.Source == "manual"), owner.Store.Data.Mode).Select(g => (Key: "manual:" + g.Key, Title: "手动添加 · 快捷入口" + (g.Key.Length > 0 ? " · " + g.Key : ""), Items: g.ToArray())))
             .ToList();
 
-        if (renderedListView != listView)
+        if (renderedListView != listView || Math.Abs(renderedUnit - l.Unit) > 0.001)
         {
             groups.Children.Clear();
             tiles.Clear();
             renderedListView = listView;
+            renderedUnit = l.Unit;
         }
+        groups.Width = listView ? double.NaN : Math.Max(0, l.Columns * (l.DrawerTile + l.GapX) - l.GapX);
+        groups.HorizontalAlignment = listView ? HorizontalAlignment.Stretch : HorizontalAlignment.Center;
 
         // Build lookup of existing tile controls by file path (primary) and entry ID (fallback)
         var oldByPath = new Dictionary<string, Border>(StringComparer.OrdinalIgnoreCase);

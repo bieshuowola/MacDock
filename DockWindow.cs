@@ -62,6 +62,11 @@ internal sealed class DockWindow : GlassWindow
         Content = Surface;
         Height = c.Layout.DockHeight;
         DragOver += BlankOver; Drop += BlankDrop;
+        bool dropPreviewActive=false;
+        AddHandler(DragDrop.DragEnterEvent,new DragEventHandler((_,a)=>{dropPreviewActive=true;Native.DropPreviewHelper.DragEnter(Handle,a);}),true);
+        AddHandler(DragDrop.DragOverEvent,new DragEventHandler((_,a)=>{if(!dropPreviewActive){dropPreviewActive=true;Native.DropPreviewHelper.DragEnter(Handle,a);}else Native.DropPreviewHelper.DragOver(a);}),true);
+        AddHandler(DragDrop.DragLeaveEvent,new DragEventHandler((_,_)=>{if(dropPreviewActive&&(!Native.GetCursorPos(out var p)||!Contains(p))){dropPreviewActive=false;Native.DropPreviewHelper.DragLeave();}}),true);
+        AddHandler(DragDrop.DropEvent,new DragEventHandler((_,a)=>{dropPreviewActive=false;Native.DropPreviewHelper.Drop(a);}),true);
         PreviewDragEnter+=(_,a)=> { if(a.Data.GetDataPresent(DataFormats.FileDrop)&&!a.Data.GetDataPresent("MacDock.Entry"))owner.SetExternalFileDrag(true); if(!mouseInhibited){mouseInhibited=true;ResetMagnification();} };
         PreviewDragLeave+=(_,_)=> {Native.GetCursorPos(out var p);if(!Contains(p)&&!owner.InternalDragging)mouseInhibited=false;if((Native.GetAsyncKeyState(1)&0x8000)==0&&owner.Drawer?.IsVisible!=true)owner.SetExternalFileDrag(false);};
         PreviewDrop+=(_,_)=>{mouseInhibited=false;owner.SetExternalFileDrag(false);};

@@ -266,7 +266,7 @@ internal sealed class Controller : IDisposable
     readonly CancellationTokenSource updateLifetime=new();
     CancellationTokenSource? automaticRequest;
     UpdateStatus updateStatus=new(null,null,null);
-    internal sealed record UpdateStatus(DateTimeOffset? Checked,string? Version,string? Notes);
+    internal sealed record UpdateStatus(DateTimeOffset? Checked,string? Version,string? Notes,bool IsRevision=false);
     internal UpdateStatus Updates=>updateStatus;
     internal event Action? UpdateStatusChanged;
     internal string? UpdateProblem {get;private set;}
@@ -733,11 +733,14 @@ internal sealed class Controller : IDisposable
         var layout=Layout;
         if(dpiChanged||layout!=lastDisplayLayout)
         {
+            Dock.InvalidateDpiCache();
+            Drawer?.InvalidateDpiCache();
             bool geometryChanged=dpiChanged||lastDisplayLayout==null||Math.Abs(lastDisplayLayout.Unit-layout.Unit)>.001;
             if(geometryChanged||lastDisplayLayout!.VisibleDockCount(Store.PinnedEntries().Count)!=layout.VisibleDockCount(Store.PinnedEntries().Count))Dock.Rebuild();
             if(Drawer is {} drawer)
             {
                 if(drawerClosing){drawerMotion.Cancel();CompleteDrawerMotion(false);}
+                drawer.InvalidatePrebakedSurface();
                 drawer.ApplyLayout();
                 if(geometryChanged||lastDisplayLayout!.DrawerWidth!=layout.DrawerWidth)drawer.ApplyCustomOrder();
             }
@@ -1784,7 +1787,7 @@ internal sealed class Controller : IDisposable
         trayMenu=menu;menu.IsOpen=true;
     }
     const string RunKey="Software\\Microsoft\\Windows\\CurrentVersion\\Run";
-    internal string UpdateMenuLabel=>UpdateProgress??(updateStatus.Version is string version?$"发现新版本 · v{version}":"检查更新");
+    internal string UpdateMenuLabel=>UpdateProgress??(updateStatus.Version is string version?(updateStatus.IsRevision?$"发现 v{version} 修订更新":$"发现新版本 · v{version}"):"检查更新");
     string UpdateStatusPath=>Path.Combine(Path.GetDirectoryName(Store.FilePath)!,"update-status.json");
     internal static TimeSpan TimeUntilUpdateCheck(DateTimeOffset now,DateTimeOffset? last)=>
         last is DateTimeOffset time&&time<=now&&now-time<TimeSpan.FromHours(24)?TimeSpan.FromHours(24)-(now-time):TimeSpan.Zero;
@@ -1795,14 +1798,15 @@ internal sealed class Controller : IDisposable
         {
             var saved=System.Text.Json.JsonSerializer.Deserialize<UpdateStatus>(File.ReadAllText(UpdateStatusPath));
             if(saved==null)return;
-            bool newer=Version.TryParse(saved.Version,out var version)&&version>Version.Parse(ReleaseUpdates.CurrentVersion);
-            updateStatus=new UpdateStatus(saved.Checked,newer?saved.Version:null,newer?saved.Notes:null);
+            var current=Version.Parse(ReleaseUpdates.CurrentVersion);
+            bool valid=Version.TryParse(saved.Version,out var version)&&(version>current||(version==current&&saved.IsRevision));
+            updateStatus=new UpdateStatus(saved.Checked,valid?saved.Version:null,valid?saved.Notes:null,valid&&saved.IsRevision);
         }
         catch(Exception error){DiagnosticsLog.Error(error,"update.history");}
     }
     void SaveUpdateStatus(ReleaseUpdates.Manifest? next)
     {
-        updateStatus=new UpdateStatus(DateTimeOffset.UtcNow,next?.Version,next?.Notes);
+        updateStatus=new UpdateStatus(DateTimeOffset.UtcNow,next?.Version,next?.Notes,next?.IsRevision??false);
         try
         {
             string temp=UpdateStatusPath+".tmp";

@@ -256,6 +256,7 @@ internal class GlassWindow : Window
             HwndSource.FromHwnd(Handle).AddHook((nint h,int m,nint w,nint l,ref bool handled)=>{if(m==0x20A)LastRawWheel=$"{Title}:{h}; fg={Native.GetForegroundWindow()}";return 0;});
             HwndSource.FromHwnd(Handle).AddHook((nint h,int m,nint w,nint l,ref bool handled)=>
             {
+                if(m is 0x02E0 or 0x007E){UpdateCachedDpi();return 0;}
                 if(m==0x0020&&(MenuTracking||ShellMenu.ActivePopup!=0)){Native.SetArrowCursor();handled=true;return 1;}
                 if(m==0x47&&!MenuTracking)
                 {
@@ -280,6 +281,7 @@ internal class GlassWindow : Window
             if(this is DrawerWindow or DockWindow or RestShadow&&Native.HostMaterial){HwndSource.FromHwnd(Handle).CompositionTarget.BackgroundColor=Colors.Transparent;int policy=1;Native.DwmSetWindowAttribute(Handle,2,ref policy,4);var margins=new Native.Margins{Left=-1,Top=-1,Right=-1,Bottom=-1};Native.DwmExtendFrameIntoClientArea(Handle,ref margins);}
         };
     }
+    internal void InvalidateDpiCache(){cachedDpiScale=0;UpdateCachedDpi();}
     void UpdateCachedDpi()
     {
         if(Handle==0)return;
@@ -316,6 +318,7 @@ internal class GlassWindow : Window
     }
     protected void SetMaterialGenie(GeniePose? pose)
     {
+        if(cachedDpiScale<=0)UpdateCachedDpi();
         bool change=(geniePose==null)!=(pose==null);geniePose=pose;usesGenie=true;double dpi=cachedDpiScale;
         if(pose!=null){if(change&&Handle!=0){int policy=1;Native.DwmSetWindowAttribute(Handle,2,ref policy,4);}if(MaterialInset==0)GeniePose.SetInputRegion(Handle,pose,dpi);hostGlass?.Deform(pose,dpi);}
         else{hostGlass?.Deform(null,dpi);GeniePose.SetRestRegion(Handle,MaterialRadius,dpi);}

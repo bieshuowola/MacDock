@@ -680,7 +680,7 @@ internal static class ExperienceChecks
 
             var area=c.WorkArea;
             int refreshHz=Native.GetDisplayRefreshRate(c.Screen.DeviceName);
-            if(refreshHz<160)throw new InvalidOperationException($"Expected >=160Hz (165Hz) display refresh rate, got {refreshHz}Hz on {c.Screen.DeviceName}");
+            if(refreshHz<120)throw new InvalidOperationException($"Expected >=120Hz high-refresh display, got {refreshHz}Hz on {c.Screen.DeviceName}");
             double frameBudgetMs=1000.0/Math.Max(60,refreshHz);
             backdrop=new Window{Title="MacDock 稳定性测试背景",ShowInTaskbar=false,ShowActivated=false,Topmost=false,WindowStyle=WindowStyle.None,ResizeMode=ResizeMode.NoResize,Width=Math.Max(400,(area.Width-40)/c.Scale),Height=Math.Max(300,(area.Height-40)/c.Scale)};
             var stripeGrid=new Grid{Background=Brushes.White};

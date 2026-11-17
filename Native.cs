@@ -9,7 +9,7 @@ using System.IO;
 using ComData = System.Runtime.InteropServices.ComTypes.IDataObject;
 
 namespace MacDock;
-internal static class Native
+internal static partial class Native
 {
     [StructLayout(LayoutKind.Sequential)] internal struct Point { public int X,Y; public Point(int x,int y) { X=x;Y=y; } }
     [StructLayout(LayoutKind.Sequential)] internal struct Rect { public int Left,Top,Right,Bottom; public bool Contains(Point p) => p.X>=Left && p.X<Right && p.Y>=Top && p.Y<Bottom; }
@@ -810,6 +810,52 @@ internal interface IShellDropTarget
     [PreserveSig] int DragOver(uint keys,Native.Point point,ref uint effect);
     [PreserveSig] int DragLeave();
     [PreserveSig] int Drop([MarshalAs(UnmanagedType.Interface)] ComData data,uint keys,Native.Point point,ref uint effect);
+}
+[ComImport,Guid("4657278A-411B-11d2-839A-00C04FD918D0")]
+internal class DragDropHelper { }
+[ComImport,Guid("4657278B-411B-11d2-839A-00C04FD918D0"),InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+internal interface IDropTargetHelper
+{
+    void DragEnter(nint hwndTarget,[MarshalAs(UnmanagedType.Interface)] ComData dataObject,ref Native.Point pt,uint effect);
+    void DragLeave();
+    void DragOver(ref Native.Point pt,uint effect);
+    void Drop([MarshalAs(UnmanagedType.Interface)] ComData dataObject,ref Native.Point pt,uint effect);
+    void Show([MarshalAs(UnmanagedType.Bool)] bool show);
+}
+internal static partial class Native
+{
+    internal static class DropPreviewHelper
+    {
+        [ThreadStatic] static IDropTargetHelper? instance;
+        static IDropTargetHelper? Instance => instance ??= Create();
+        static IDropTargetHelper? Create()
+        {
+            try { return (IDropTargetHelper)new DragDropHelper(); }
+            catch { return null; }
+        }
+        internal static void DragEnter(nint hwnd,System.Windows.DragEventArgs e)
+        {
+            if(hwnd==0||e.Data is not ComData com)return;
+            try{GetCursorPos(out var pt);Instance?.DragEnter(hwnd,com,ref pt,(uint)e.Effects);}
+            catch{}
+        }
+        internal static void DragOver(System.Windows.DragEventArgs e)
+        {
+            try{GetCursorPos(out var pt);Instance?.DragOver(ref pt,(uint)e.Effects);}
+            catch{}
+        }
+        internal static void DragLeave()
+        {
+            try{Instance?.DragLeave();}
+            catch{}
+        }
+        internal static void Drop(System.Windows.DragEventArgs e)
+        {
+            if(e.Data is not ComData com)return;
+            try{GetCursorPos(out var pt);Instance?.Drop(com,ref pt,(uint)e.Effects);}
+            catch{}
+        }
+    }
 }
 internal sealed class ShellDrop : IDisposable
 {
