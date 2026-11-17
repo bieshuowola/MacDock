@@ -902,18 +902,21 @@ internal static class ExperienceChecks
             for(cycle=1;cycle<=4;cycle++)
             {
                 mode="open";lastTick=0;
+                c.Busy=true;
                 c.Expand();
                 for(int w=0;w<60&&(!c.Dock.IsVisible||c.DockMotionRunning||c.DockProgress<0.99);w++)await Task.Delay(25);
                 mode="idle";
                 if(cycle==1&&c.Dock.IsVisible&&Native.GetWindowRect(c.Dock.Handle,out var dr))
                 {
-                    int capX=Math.Max(area.Left,dr.Left-24),capY=Math.Max(area.Top,dr.Top-24);
-                    int capW=Math.Min(area.Right-capX,(dr.Right-dr.Left)+48),capH=Math.Min(area.Bottom-capY,(dr.Bottom-dr.Top)+48);
+                    var scr=c.Screen.Bounds;
+                    int capX=Math.Max(scr.Left,dr.Left-24),capY=Math.Max(scr.Top,dr.Top-24);
+                    int capW=Math.Min(scr.Right-capX,(dr.Right-dr.Left)+48),capH=Math.Min(scr.Bottom-capY,(dr.Bottom-dr.Top)+48);
                     if(capW>20&&capH>20)Save("dock-stability-open.png",new System.Drawing.Rectangle(capX,capY,capW,capH));
                 }
                 await Task.Delay(60);
 
                 mode="close";lastTick=0;
+                c.Busy=false;
                 c.Collapse();
                 for(int w=0;w<60&&(c.Dock.IsVisible||c.DockMotionRunning);w++)await Task.Delay(25);
                 mode="idle";

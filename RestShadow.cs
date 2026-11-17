@@ -11,7 +11,8 @@ namespace MacDock;
 internal sealed class RestShadow:GlassWindow
 {
     const double Pad=SoftContour.Pad;
-    readonly LegacyDockContour canvas=new();
+    readonly SoftContour canvas=new();
+    double laidOutWidth,laidOutHeight;
     [DllImport("user32.dll")]static extern nint GetWindow(nint h,uint command);
     internal RestShadow():base(material:false)
     {
@@ -23,14 +24,12 @@ internal sealed class RestShadow:GlassWindow
     internal void Sync(nint below,Native.Rect bounds,double dpi,bool visible)
     {
         if(!visible){if(IsVisible)Hide();return;}
-        if(!IsVisible){Show();Native.SetWindowLongPtr(Handle,-20,(nint)(Native.GetWindowLongPtr(Handle,-20).ToInt64()|0x20));}
+        bool justShown=!IsVisible;
+        if(justShown){Show();Native.SetWindowLongPtr(Handle,-20,(nint)(Native.GetWindowLongPtr(Handle,-20).ToInt64()|0x20));}
         int x=bounds.Left-(int)Math.Round(Pad*dpi),y=bounds.Top-(int)Math.Round(Pad*dpi),w=(int)Math.Round(Width*dpi),h=(int)Math.Round(Height*dpi);
-        // A redundant SetWindowPos can re-present the previous layered bitmap while
-        // the next Path measure/render is pending. Geometry-only frames stay wholly
-        // in WPF; flush their layout in the same update as the foreground mesh.
         if(!Native.GetWindowRect(Handle,out var old)||old.Left!=x||old.Top!=y||old.Right-old.Left!=w||old.Bottom-old.Top!=h||GetWindow(below,2)!=Handle)
             Native.SetWindowPos(Handle,below,x,y,w,h,0x10);
-        canvas.UpdateLayout();
+        if(justShown||laidOutWidth!=Width||laidOutHeight!=Height){laidOutWidth=Width;laidOutHeight=Height;canvas.UpdateLayout();}
     }
 }
 
@@ -73,9 +72,19 @@ internal sealed class SoftContour:FrameworkElement
         List<Point> points;
         if(pose==null){
             var r=sheet;r.Offset(Pad,Pad+4);
-            var flat=new RectangleGeometry(r,radius,radius).GetFlattenedPathGeometry(.2,ToleranceType.Absolute);
-            points=new List<Point>();
-            foreach(var f in flat.Figures){points.Add(f.StartPoint);foreach(var segment in f.Segments){if(segment is LineSegment line)points.Add(line.Point);else if(segment is PolyLineSegment poly)points.AddRange(poly.Points);}}
+            double rx=Math.Clamp(radius,0,Math.Min(r.Width,r.Height)/2);
+            const int arcSteps=24;
+            points=new List<Point>(arcSteps*4+4);
+            if(rx<=0.01){
+                points.Add(new Point(r.Left,r.Top));points.Add(new Point(r.Right,r.Top));
+                points.Add(new Point(r.Right,r.Bottom));points.Add(new Point(r.Left,r.Bottom));
+            }else{
+                double cx0=r.Left+rx,cy0=r.Top+rx,cx1=r.Right-rx,cy1=r.Bottom-rx;
+                for(int i=0;i<=arcSteps;i++){double a=Math.PI+i*(Math.PI/2)/arcSteps;points.Add(new Point(cx0+rx*Math.Cos(a),cy0+rx*Math.Sin(a)));}
+                for(int i=0;i<=arcSteps;i++){double a=-Math.PI/2+i*(Math.PI/2)/arcSteps;points.Add(new Point(cx1+rx*Math.Cos(a),cy0+rx*Math.Sin(a)));}
+                for(int i=0;i<=arcSteps;i++){double a=i*(Math.PI/2)/arcSteps;points.Add(new Point(cx1+rx*Math.Cos(a),cy1+rx*Math.Sin(a)));}
+                for(int i=0;i<=arcSteps;i++){double a=Math.PI/2+i*(Math.PI/2)/arcSteps;points.Add(new Point(cx0+rx*Math.Cos(a),cy1+rx*Math.Sin(a)));}
+            }
         }
         else{
             points=new List<Point>((GeniePose.Rows+1)*2);
