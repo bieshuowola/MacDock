@@ -87,7 +87,9 @@ internal sealed class DockWindow : GlassWindow
         Rebuild();
     }
     public override void RefreshMaterial(){base.RefreshMaterial();if(Surface is not Border surface)return;if(MaterialAvailable)glassTint.SetResourceReference(Border.BackgroundProperty,"GlassSurface");else glassTint.Background=surface.Background;surface.Background=Brushes.Transparent;SetReveal(reveal);}
-    internal void SetReveal(double value){reveal=value;SetMaterialReveal(value);double w=Math.Max(0,ActualWidth),h=Math.Max(0,ActualHeight);var (r,c)=DockMotion.Shape(w,h,MaterialRadius,value);glassTint.Width=r.Width;glassTint.Height=r.Height;glassTint.CornerRadius=new CornerRadius(c);Canvas.SetLeft(glassTint,r.X);Canvas.SetTop(glassTint,r.Y);sheetLift.Y=(1-value)*9*owner.Layout.Unit;double t=Math.Clamp(value,0,1);items.Opacity=Math.Clamp((t-.08)/.74,0,1);}
+    internal void SetReveal(double value){reveal=value;SetMaterialReveal(value);UpdateRevealGeometry(value);}
+    internal void SetRevealAndOpacity(double value,double opacity){reveal=value;SetMaterialRevealAndOpacity(value,opacity);UpdateRevealGeometry(value);}
+    void UpdateRevealGeometry(double value){double w=Math.Max(0,ActualWidth),h=Math.Max(0,ActualHeight);var (r,c)=DockMotion.Shape(w,h,MaterialRadius,value);glassTint.Width=r.Width;glassTint.Height=r.Height;glassTint.CornerRadius=new CornerRadius(c);Canvas.SetLeft(glassTint,r.X);Canvas.SetTop(glassTint,r.Y);sheetLift.Y=(1-value)*9*owner.Layout.Unit;double t=Math.Clamp(value,0,1);items.Opacity=Math.Clamp((t-.08)/.74,0,1);}
 
     internal string GlyphDiag
     {

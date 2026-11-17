@@ -1,5 +1,6 @@
 using System.IO;
 using System.Diagnostics;
+using System.Runtime;
 using System.Runtime.InteropServices;
 using System.Threading;
 using System.Windows;
@@ -650,7 +651,7 @@ internal sealed class Controller : IDisposable
                 if(disposed)return;
                 if(slot.Revision!=revision||changed){slot.Loading=false;slot.Stamp="";lock(iconGate)iconRetryAfter.Remove(key);RequestIcon(path,px);return;}
                 slot.Update(result,version);
-                if(!result.Missing){lock(iconGate)iconRetryAfter.Remove(key);return;}
+                if(!result.Missing){lock(iconGate)iconRetryAfter.Remove(key);if(Drawer!=null&&!Drawer.IsDeforming)Drawer.InvalidatePrebakedSurface();return;}
                 if(slot.RetryCount<3&&IsValidIconTarget(path))
                 {
                     slot.RetryCount++;
@@ -771,7 +772,7 @@ internal sealed class Controller : IDisposable
             Top=area.Bottom-(int)Math.Round((Layout.DockHeight+Layout.DockBottomGap)*Scale),
             Bottom=area.Bottom-(int)Math.Round(Layout.DockBottomGap*Scale)
         };
-        if(Dock.IsVisible && dockToken==0) { dockY=dockRect.Top;Native.SetWindowPos(Dock.Handle,-1,dockRect.Left,dockRect.Top,0,0,0x0011); }
+        if(Dock.IsVisible && dockToken==0) { dockY=dockRect.Top;Native.DeferWindowPosAsync(Dock.Handle,-1,dockRect.Left,dockRect.Top,0,0,0x0001); }
         else if(!Dock.IsVisible) dockY=dockRect.Top;
     }
     internal void PositionDockPreview(){PlaceDock(WorkArea);UpdateModalRegions();}
@@ -786,7 +787,7 @@ internal sealed class Controller : IDisposable
     void MoveDock(int y)
     {
         dockY=y;
-        Native.SetWindowPos(Dock.Handle,-1,dockRect.Left,y,0,0,0x0011);
+        Native.DeferWindowPosAsync(Dock.Handle,-1,dockRect.Left,y,0,0,0x0001);
     }
     internal void UpdateModalRegions()
     {
@@ -980,6 +981,30 @@ internal sealed class Controller : IDisposable
         // covers that case only. A real exit starts the spring directly.
         leave.Start();
     }
+    bool animBoostActive;
+    GCLatencyMode savedGcLatency;
+    ProcessPriorityClass savedProcPriority=ProcessPriorityClass.Normal;
+    ThreadPriority savedThreadPriority=ThreadPriority.Normal;
+    void BeginAnimationBoost()
+    {
+        if(animBoostActive||disposed)return;
+        animBoostActive=true;
+        try{Native.timeBeginPeriod(1);}catch{}
+        try{savedGcLatency=GCSettings.LatencyMode;GCSettings.LatencyMode=GCLatencyMode.SustainedLowLatency;}catch{}
+        try{using var p=Process.GetCurrentProcess();savedProcPriority=p.PriorityClass;if(savedProcPriority!=ProcessPriorityClass.High&&savedProcPriority!=ProcessPriorityClass.RealTime)p.PriorityClass=ProcessPriorityClass.High;}catch{}
+        try{savedThreadPriority=Thread.CurrentThread.Priority;if(savedThreadPriority<ThreadPriority.Highest)Thread.CurrentThread.Priority=ThreadPriority.Highest;}catch{}
+    }
+    void EndAnimationBoost(bool force=false)
+    {
+        if(!animBoostActive)return;
+        if(!force&&(dockMotion.Running||drawerMotion.Running))return;
+        animBoostActive=false;
+        try{Thread.CurrentThread.Priority=savedThreadPriority;}catch{}
+        try{using var p=Process.GetCurrentProcess();p.PriorityClass=savedProcPriority;}catch{}
+        try{GCSettings.LatencyMode=savedGcLatency;}catch{}
+        try{Native.timeEndPeriod(1);}catch{}
+    }
+
     void ShowDockAnimated()
     {
         GestureChecks.Trace?.Invoke("dock-show", new { phase = dockMotion.Value, velocity = dockMotion.Velocity });
@@ -990,7 +1015,7 @@ internal sealed class Controller : IDisposable
         {
             Dock.BeginWake();dockMotion.Snap(reduced?1:0);MoveDock(dockRect.Top);Dock.Show();dockShowing=true;
         }
-        dockToken=++dockEpoch;if(reduced){dockMotion.Snap(1);CompleteDockMotion(true);}else dockMotion.To(true);
+        dockToken=++dockEpoch;if(reduced){dockMotion.Snap(1);CompleteDockMotion(true);}else{BeginAnimationBoost();dockMotion.To(true);}
     }
     void HideDockAnimated(bool instant=false)
     {
@@ -999,11 +1024,12 @@ internal sealed class Controller : IDisposable
         var reduced=instant||Store.Data.ReducedMotion||!Anim.Allowed;
         GestureChecks.Trace?.Invoke("dock-hide", new { phase = dockMotion.Value, velocity = dockMotion.Velocity });
         Dock.DismissTip();dockHiding=true;dockToken=++dockEpoch;
-        if(reduced){dockMotion.Snap(0);CompleteDockMotion(false);}else dockMotion.To(false);
+        if(!reduced&&!indicatorSuppressed&&!indicator.IsVisible){indicator.Opacity=0;indicator.Show();}
+        if(reduced){dockMotion.Snap(0);CompleteDockMotion(false);}else{BeginAnimationBoost();dockMotion.To(false);}
     }
-    void RenderDockPose(double phase){Dock.SetReveal(phase);SetDockOpacity(Math.Clamp(phase*1.4,0,1));RenderIndicator(phase);DockAnimationFrame?.Invoke(phase,dockMotion?.Velocity??0);}
-    void CompleteDockMotion(bool open){dockToken=0;dockHiding=false;if(open){MoveDock(dockRect.Top);Dock.SetReveal(1);SetDockOpacity(1);}else{Dock.Hide();dockShowing=false;Dock.SetReveal(1);SetDockOpacity(1);dockY=dockRect.Top;CheckFullscreen();}}
-    internal void SettleDockMotion(){if(!Dock.IsVisible)return;dockMotion.Snap(1);dockToken=0;dockHiding=false;MoveDock(dockRect.Top);}
+    void RenderDockPose(double phase){Dock.SetRevealAndOpacity(phase,Math.Clamp(phase*1.4,0,1));RenderIndicator(phase);DockAnimationFrame?.Invoke(phase,dockMotion?.Velocity??0);}
+    void CompleteDockMotion(bool open){dockToken=0;dockHiding=false;if(open){MoveDock(dockRect.Top);Dock.SetRevealAndOpacity(1,1);}else{Dock.Hide();dockShowing=false;Dock.SetRevealAndOpacity(1,1);dockY=dockRect.Top;CheckFullscreen();}EndAnimationBoost();}
+    internal void SettleDockMotion(){if(!Dock.IsVisible)return;dockMotion.Snap(1);dockToken=0;dockHiding=false;MoveDock(dockRect.Top);EndAnimationBoost();}
     void PollSuppressWakeKey()
     {
         if(disposed)return;
@@ -1039,7 +1065,8 @@ internal sealed class Controller : IDisposable
         var p=WakeStrip.Pose(phase);
         if(indicator.Content is Border line){line.Width=86*Layout.DensityUnit*p.Length;line.Height=4.5*Layout.DensityUnit*p.Height;}
         indicator.Opacity=p.Alpha;
-        if(p.Alpha>.001){if(!indicator.IsVisible)indicator.Show();}else if(indicator.IsVisible)indicator.Hide();
+        if(p.Alpha>.001){if(!indicator.IsVisible)indicator.Show();}
+        else if(indicator.IsVisible&&!dockMotion.Running)indicator.Hide();
     }
     public void CheckFullscreen()
     {
@@ -1049,6 +1076,7 @@ internal sealed class Controller : IDisposable
             DrawerPinned=false;Drawer?.UpdatePinVisual();
             if(Drawer!=null){drawerMotion.Cancel();drawerHideDeferred=false;drawerClosing=false;drawerToken=0;Drawer.Hide();Drawer.EndGenie();Drawer.ResetSelection();if(Drawer.Surface!=null)Drawer.Surface.Opacity=1;}
             Dock.SetGatewayRest(false);UpdateModalRegions();HideDockAnimated(true);ShowIndicator(false,true);intent.Reset();wake.Stop();
+            EndAnimationBoost();
             return;
         }
         if(DesktopResident&&!SuppressDockActive)
@@ -1113,11 +1141,12 @@ internal sealed class Controller : IDisposable
             {
                 CompositionTarget.Rendering-=onFirstFrame;
                 if(disposed||drawerClosing||drawerToken!=token||Drawer!=d||!d.IsVisible)return;
+                BeginAnimationBoost();
                 drawerMotion.To(true);
             };
             CompositionTarget.Rendering+=onFirstFrame;
         }
-        else drawerMotion.To(true);
+        else{BeginAnimationBoost();drawerMotion.To(true);}
     }
     double drawerAnchorX,drawerAnchorY;
 #if MACDOCK_EXPERIENCE_CHECKS
@@ -1184,6 +1213,7 @@ internal sealed class Controller : IDisposable
             QueueDockLeaveCheck();
         }
         MeasureDrawerStage(open?"open-complete":"close-complete");
+        EndAnimationBoost();
     }
 
     internal void GatewayCaptureEnded(bool released = false)
@@ -1203,13 +1233,13 @@ internal sealed class Controller : IDisposable
         });
     }
     internal void PauseDrawerMotion(){if(drawerMotion.Running){drawerMotion.Pause();drawerFrameStamp=0;}}
-    internal void ResumeDrawerMotion(){drawerMotion.Resume();}
+    internal void ResumeDrawerMotion(){if(!drawerMotion.Running)BeginAnimationBoost();drawerMotion.Resume();}
     internal void SettleDrawerMotion([System.Runtime.CompilerServices.CallerMemberName]string caller="")
     {
         if(Drawer is not {IsVisible:true} d)return;
         if(!d.IsDeforming&&!drawerMotion.Running)return;
         T("settle-drawer:"+caller+";p="+drawerMotion.Value.ToString("F3"));
-        drawerMotion.Snap(1);drawerToken=0;drawerClosing=false;d.EndGenie();d.SetSurfaceOpacity(1);UpdateModalRegions();
+        drawerMotion.Snap(1);drawerToken=0;drawerClosing=false;d.EndGenie();d.SetSurfaceOpacity(1);UpdateModalRegions();EndAnimationBoost();
     }
     public void CloseDrawer(bool keepDock=false,bool collapseDock=false,bool force=false)
     {
@@ -1225,6 +1255,7 @@ internal sealed class Controller : IDisposable
         drawerClosing=true;drawerToken=++drawerEpoch;
         if(Store.Data.ReducedMotion||!Anim.Allowed){drawerMotion.Cancel();CompleteDrawerMotion(false);return;}
         if(!d.IsDeforming){var r=DrawerRect();var gateway=Dock.GatewayCenter;drawerAnchorX=(gateway.X-r.Left)/Scale-d.MaterialInset;drawerAnchorY=(gateway.Y-r.Top)/Scale-d.MaterialInset;d.SetGenie(drawerMotion.Value,drawerAnchorX,drawerAnchorY);MoveDock(dockRect.Top);}
+        BeginAnimationBoost();
         drawerMotion.To(false);
     }
     public void Launch(Entry e)=>Launch(e,false);
@@ -2136,7 +2167,7 @@ internal sealed class Controller : IDisposable
     {
         void Trace(string value){if(Environment.GetEnvironmentVariable("MACDOCK_TEST_RESULTS") is string folder)File.AppendAllText(Path.Combine(folder,"dispose-stages.txt"),value+Environment.NewLine);}
         Trace("begin");
-        if(disposed)return;disposed=true;Native.RestoreSystemCursors(force:true);updateCheck.Stop();updateLifetime.Cancel();updateLifetime.Dispose();dockMotion.Cancel();drawerMotion.Cancel();PointerSort.Active?.End(false);if(trayMenu!=null)trayMenu.IsOpen=false;wake.Stop();leave.Stop();refresh.Stop();syncDebounce.Stop();safetySync.Stop();displayRetry.Stop();suppressPoll.Stop();foreach(var t in iconRetryTimers.ToArray())t.Stop();iconRetryTimers.Clear();
+        if(disposed)return;disposed=true;Native.RestoreSystemCursors(force:true);updateCheck.Stop();updateLifetime.Cancel();updateLifetime.Dispose();dockMotion.Cancel();drawerMotion.Cancel();EndAnimationBoost(force:true);PointerSort.Active?.End(false);if(trayMenu!=null)trayMenu.IsOpen=false;wake.Stop();leave.Stop();refresh.Stop();syncDebounce.Stop();safetySync.Stop();displayRetry.Stop();suppressPoll.Stop();foreach(var t in iconRetryTimers.ToArray())t.Stop();iconRetryTimers.Clear();
         foreach(var w in watchers) { try { w.EnableRaisingEvents=false;w.Dispose(); } catch { } }
         SystemEvents.DisplaySettingsChanged-=DisplayChanged;SystemEvents.UserPreferenceChanged-=PreferenceChanged;SystemEvents.PowerModeChanged-=PowerChanged;
         hook?.Dispose();shellChanges?.Dispose();foreach(var h in eventHooks)Native.UnhookWinEvent(h);

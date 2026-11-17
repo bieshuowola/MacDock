@@ -201,6 +201,38 @@ internal static class Native
     [DllImport("user32.dll",EntryPoint="GetWindowLongPtrW")] internal static extern nint GetWindowLongPtr(nint hwnd,int index);
     [DllImport("user32.dll",EntryPoint="SetWindowLongPtrW")] internal static extern nint SetWindowLongPtr(nint hwnd,int index,nint value);
     [DllImport("user32.dll")] internal static extern bool SetWindowPos(nint hwnd,nint after,int x,int y,int cx,int cy,uint flags);
+    [DllImport("user32.dll")] internal static extern nint BeginDeferWindowPos(int numWindows);
+    [DllImport("user32.dll")] internal static extern nint DeferWindowPos(nint winPosInfo,nint hwnd,nint after,int x,int y,int cx,int cy,uint flags);
+    [DllImport("user32.dll")] internal static extern bool EndDeferWindowPos(nint winPosInfo);
+    [DllImport("winmm.dll")] internal static extern uint timeBeginPeriod(uint period);
+    [DllImport("winmm.dll")] internal static extern uint timeEndPeriod(uint period);
+    internal static void DeferWindowPosAsync(nint hwnd,nint after,int x,int y,int cx,int cy,uint flags)
+    {
+        if(hwnd==0)return;
+        uint f=flags|0x4210u; // SWP_ASYNCWINDOWPOS | SWP_NOOWNERZORDER | SWP_NOACTIVATE
+        nint hdwp=BeginDeferWindowPos(1);
+        if(hdwp!=0)
+        {
+            hdwp=DeferWindowPos(hdwp,hwnd,after,x,y,cx,cy,f);
+            if(hdwp!=0&&EndDeferWindowPos(hdwp))return;
+        }
+        SetWindowPos(hwnd,after,x,y,cx,cy,f);
+    }
+    internal static void DeferWindowPosPair(nint hwnd1,nint after1,int x1,int y1,int cx1,int cy1,uint flags1,nint hwnd2,nint after2,int x2,int y2,int cx2,int cy2,uint flags2)
+    {
+        if(hwnd1==0){DeferWindowPosAsync(hwnd2,after2,x2,y2,cx2,cy2,flags2);return;}
+        if(hwnd2==0){DeferWindowPosAsync(hwnd1,after1,x1,y1,cx1,cy1,flags1);return;}
+        const uint baseFlags=0x4210u; // SWP_ASYNCWINDOWPOS | SWP_NOOWNERZORDER | SWP_NOACTIVATE
+        nint hdwp=BeginDeferWindowPos(2);
+        if(hdwp!=0)
+        {
+            hdwp=DeferWindowPos(hdwp,hwnd1,after1,x1,y1,cx1,cy1,flags1|baseFlags);
+            if(hdwp!=0)hdwp=DeferWindowPos(hdwp,hwnd2,after2,x2,y2,cx2,cy2,flags2|baseFlags);
+            if(hdwp!=0&&EndDeferWindowPos(hdwp))return;
+        }
+        SetWindowPos(hwnd1,after1,x1,y1,cx1,cy1,flags1|baseFlags);
+        SetWindowPos(hwnd2,after2,x2,y2,cx2,cy2,flags2|baseFlags);
+    }
     [DllImport("user32.dll")] internal static extern uint GetDpiForWindow(nint hwnd);
     [DllImport("user32.dll")] internal static extern bool RegisterHotKey(nint hwnd,int id,uint mod,uint key);
     [DllImport("user32.dll")] internal static extern bool UnregisterHotKey(nint hwnd,int id);

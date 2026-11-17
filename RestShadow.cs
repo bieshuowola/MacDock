@@ -13,6 +13,10 @@ internal sealed class RestShadow:GlassWindow
     const double Pad=SoftContour.Pad;
     readonly SoftContour canvas=new();
     double laidOutWidth,laidOutHeight;
+    Native.Rect syncedBounds;
+    nint syncedBelow;
+    int syncedW,syncedH;
+    bool zAligned,exStyleApplied;
     [DllImport("user32.dll")]static extern nint GetWindow(nint h,uint command);
     internal RestShadow():base(material:false)
     {
@@ -21,21 +25,45 @@ internal sealed class RestShadow:GlassWindow
         SourceInitialized+=(_,_)=>HwndSource.FromHwnd(Handle).AddHook((nint h,int m,nint w,nint l,ref bool handled)=>{if(m==0x84){handled=true;return -1;}return 0;});
     }
     internal void Shape(double width,double height,double radius,Rect sheet,GeniePose? pose,double alpha){Width=width+2*Pad;Height=height+2*Pad;canvas.Shape(width,height,radius,sheet,pose,alpha);}
+    internal void InvalidateZOrder()=>zAligned=false;
+    internal bool PreparePlacement(nint below,Native.Rect bounds,double dpi,bool visible,out nint hwnd,out int x,out int y,out int w,out int h,out uint flags)
+    {
+        hwnd=0;x=y=w=h=0;flags=0;
+        if(!visible){if(IsVisible)Hide();zAligned=false;return false;}
+        bool justShown=!IsVisible;
+        if(justShown){Show();if(!exStyleApplied){Native.SetWindowLongPtr(Handle,-20,(nint)(Native.GetWindowLongPtr(Handle,-20).ToInt64()|0x20));exStyleApplied=true;}}
+        x=bounds.Left-(int)Math.Round(Pad*dpi);y=bounds.Top-(int)Math.Round(Pad*dpi);w=(int)Math.Round(Width*dpi);h=(int)Math.Round(Height*dpi);
+        if(justShown||laidOutWidth!=Width||laidOutHeight!=Height){laidOutWidth=Width;laidOutHeight=Height;canvas.UpdateLayout();}
+        bool sameBounds=!justShown&&bounds.Equals(syncedBounds)&&w==syncedW&&h==syncedH;
+        bool needZ=justShown||!zAligned||syncedBelow!=below||GetWindow(below,2)!=Handle;
+        if(sameBounds&&!needZ)return false;
+        flags=(needZ?0u:0x0004u)|(!justShown&&w==syncedW&&h==syncedH?0x0001u:0u);
+        syncedBounds=bounds;syncedBelow=below;syncedW=w;syncedH=h;zAligned=true;hwnd=Handle;
+        return true;
+    }
     internal void Sync(nint below,Native.Rect bounds,double dpi,bool visible)
     {
-        if(!visible){if(IsVisible)Hide();return;}
-        bool justShown=!IsVisible;
-        if(justShown){Show();Native.SetWindowLongPtr(Handle,-20,(nint)(Native.GetWindowLongPtr(Handle,-20).ToInt64()|0x20));}
-        int x=bounds.Left-(int)Math.Round(Pad*dpi),y=bounds.Top-(int)Math.Round(Pad*dpi),w=(int)Math.Round(Width*dpi),h=(int)Math.Round(Height*dpi);
-        if(!Native.GetWindowRect(Handle,out var old)||old.Left!=x||old.Top!=y||old.Right-old.Left!=w||old.Bottom-old.Top!=h||GetWindow(below,2)!=Handle)
-            Native.SetWindowPos(Handle,below,x,y,w,h,0x10);
-        if(justShown||laidOutWidth!=Width||laidOutHeight!=Height){laidOutWidth=Width;laidOutHeight=Height;canvas.UpdateLayout();}
+        if(PreparePlacement(below,bounds,dpi,visible,out var hwnd,out int x,out int y,out int w,out int h,out uint flags))
+            Native.DeferWindowPosAsync(hwnd,below,x,y,w,h,flags);
     }
 }
 
 internal sealed class SoftContour:FrameworkElement
 {
     internal const double Pad=28;
+    const int ArcSteps=24;
+    static readonly (double Cos,double Sin)[] UnitArc=CreateUnitArc();
+    static (double Cos,double Sin)[] CreateUnitArc()
+    {
+        var table=new (double,double)[(ArcSteps+1)*4];
+        int k=0;
+        for(int i=0;i<=ArcSteps;i++){double a=Math.PI+i*(Math.PI/2)/ArcSteps;table[k++]=(Math.Cos(a),Math.Sin(a));}
+        for(int i=0;i<=ArcSteps;i++){double a=-Math.PI/2+i*(Math.PI/2)/ArcSteps;table[k++]=(Math.Cos(a),Math.Sin(a));}
+        for(int i=0;i<=ArcSteps;i++){double a=i*(Math.PI/2)/ArcSteps;table[k++]=(Math.Cos(a),Math.Sin(a));}
+        for(int i=0;i<=ArcSteps;i++){double a=Math.PI/2+i*(Math.PI/2)/ArcSteps;table[k++]=(Math.Cos(a),Math.Sin(a));}
+        return table;
+    }
+    readonly List<Point> pointsBuffer=new((GeniePose.Rows+1)*2);
     readonly System.Windows.Media.Media3D.MeshGeometry3D mesh=new();
     readonly System.Windows.Controls.Viewport3D viewport=new(){IsHitTestVisible=false,ClipToBounds=false};
     readonly ImageBrush profile;
@@ -69,38 +97,40 @@ internal sealed class SoftContour:FrameworkElement
         panelWidth=width;panelHeight=height;curve=radius;priorSheet=sheet;priorPose=pose;
         Width=width+2*Pad;Height=height+2*Pad;
         if(camera.Width!=Width||camera.Position.Y!=Height/2){camera.Position=new System.Windows.Media.Media3D.Point3D(Width/2,Height/2,10);camera.LookDirection=new System.Windows.Media.Media3D.Vector3D(0,0,-1);camera.UpDirection=new System.Windows.Media.Media3D.Vector3D(0,1,0);camera.Width=Width;}
-        List<Point> points;
+        var points=pointsBuffer;
+        points.Clear();
         if(pose==null){
             var r=sheet;r.Offset(Pad,Pad);
             double rx=Math.Clamp(radius,0,Math.Min(r.Width,r.Height)/2);
-            const int arcSteps=24;
-            points=new List<Point>(arcSteps*4+4);
             if(rx<=0.01){
                 points.Add(new Point(r.Left,r.Top));points.Add(new Point(r.Right,r.Top));
                 points.Add(new Point(r.Right,r.Bottom));points.Add(new Point(r.Left,r.Bottom));
             }else{
                 double cx0=r.Left+rx,cy0=r.Top+rx,cx1=r.Right-rx,cy1=r.Bottom-rx;
-                for(int i=0;i<=arcSteps;i++){double a=Math.PI+i*(Math.PI/2)/arcSteps;points.Add(new Point(cx0+rx*Math.Cos(a),cy0+rx*Math.Sin(a)));}
-                for(int i=0;i<=arcSteps;i++){double a=-Math.PI/2+i*(Math.PI/2)/arcSteps;points.Add(new Point(cx1+rx*Math.Cos(a),cy0+rx*Math.Sin(a)));}
-                for(int i=0;i<=arcSteps;i++){double a=i*(Math.PI/2)/arcSteps;points.Add(new Point(cx1+rx*Math.Cos(a),cy1+rx*Math.Sin(a)));}
-                for(int i=0;i<=arcSteps;i++){double a=Math.PI/2+i*(Math.PI/2)/arcSteps;points.Add(new Point(cx0+rx*Math.Cos(a),cy1+rx*Math.Sin(a)));}
+                int stride=ArcSteps+1,k=0;
+                for(int i=0;i<stride;i++,k++)points.Add(new Point(cx0+rx*UnitArc[k].Cos,cy0+rx*UnitArc[k].Sin));
+                for(int i=0;i<stride;i++,k++)points.Add(new Point(cx1+rx*UnitArc[k].Cos,cy0+rx*UnitArc[k].Sin));
+                for(int i=0;i<stride;i++,k++)points.Add(new Point(cx1+rx*UnitArc[k].Cos,cy1+rx*UnitArc[k].Sin));
+                for(int i=0;i<stride;i++,k++)points.Add(new Point(cx0+rx*UnitArc[k].Cos,cy1+rx*UnitArc[k].Sin));
             }
         }
         else{
-            points=new List<Point>((GeniePose.Rows+1)*2);
             for(int i=0;i<=GeniePose.Rows;i++){var row=pose.Row(GeniePose.RowT(i),true);points.Add(new Point(row.Left+Pad,row.Y+Pad));}
             for(int i=GeniePose.Rows;i>=0;i--){var row=pose.Row(GeniePose.RowT(i),true);points.Add(new Point(row.Right+Pad,row.Y+Pad));}
         }
         for(int i=points.Count-1;i>0;i--)if((points[i]-points[i-1]).Length<.001)points.RemoveAt(i);
         if(points.Count>2&&(points[0]-points[^1]).Length<.001)points.RemoveAt(points.Count-1);
         if(points.Count<3){mesh.TriangleIndices=new Int32Collection();mesh.Positions=new System.Windows.Media.Media3D.Point3DCollection();topologyCount=0;return;}
-        var positions=new System.Windows.Media.Media3D.Point3DCollection();var uv=new PointCollection();var indices=new Int32Collection();
+        bool topologyChanged=topologyCount!=points.Count;
+        var positions=new System.Windows.Media.Media3D.Point3DCollection(points.Count*2);
+        var uv=topologyChanged?new PointCollection(points.Count*2):null;
+        var indices=topologyChanged?new Int32Collection(points.Count*6):null;
         for(int i=0;i<points.Count;i++){
             var before=points[i]-points[(i+points.Count-1)%points.Count];var after=points[(i+1)%points.Count]-points[i];before.Normalize();after.Normalize();var n1=new Vector(-before.Y,before.X);var n2=new Vector(-after.Y,after.X);var normal=n1+n2;if(normal.Length<.001)normal=n2;normal.Normalize();double length=20/Math.Max(.5,Vector.Multiply(normal,n2));
-            for(int side=0;side<2;side++){var p=points[i]+normal*(side==0?-length:length);positions.Add(new System.Windows.Media.Media3D.Point3D(p.X,Height-p.Y,0));uv.Add(new Point(side,(double)i/(points.Count-1)));}
-            int a=i*2,b=((i+1)%points.Count)*2;indices.Add(a);indices.Add(b);indices.Add(a+1);indices.Add(a+1);indices.Add(b);indices.Add(b+1);
+            for(int side=0;side<2;side++){var p=points[i]+normal*(side==0?-length:length);positions.Add(new System.Windows.Media.Media3D.Point3D(p.X,Height-p.Y,0));if(uv!=null)uv.Add(new Point(side,(double)i/(points.Count-1)));}
+            if(indices!=null){int a=i*2,b=((i+1)%points.Count)*2;indices.Add(a);indices.Add(b);indices.Add(a+1);indices.Add(a+1);indices.Add(b);indices.Add(b+1);}
         }
-        positions.Freeze();uv.Freeze();indices.Freeze();mesh.Positions=positions;if(topologyCount!=points.Count){topologyCount=points.Count;mesh.TextureCoordinates=uv;mesh.TriangleIndices=indices;}
+        positions.Freeze();mesh.Positions=positions;if(topologyChanged){topologyCount=points.Count;uv!.Freeze();indices!.Freeze();mesh.TextureCoordinates=uv;mesh.TriangleIndices=indices;}
     }
 }
 internal sealed class LegacyDockContour:FrameworkElement

@@ -74,6 +74,13 @@ internal sealed class HostGlass:IDisposable
         if(w>0&&h>0&&(w!=widthPixels||h!=heightPixels||r!=radiusPixels)){root.Size=size;backdrop.Size=size;poseDirty=true;widthPixels=w;heightPixels=h;radiusPixels=r;ApplyReveal();}
     }
     internal void Reveal(double value){reveal=value;ApplyReveal();RefreshShadow();}
+    internal void RevealAndOpacity(double revealValue,double opacityValue)
+    {
+        reveal=revealValue;ApplyReveal();
+        float next=(float)Math.Clamp(opacityValue,0,1);
+        if(next!=alpha){alpha=next;root.Opacity=showing?next:0;}
+        RefreshShadow();
+    }
     void RefreshShadow()
     {
         if(inset>0)return;
@@ -81,12 +88,13 @@ internal sealed class HostGlass:IDisposable
         if(widthPixels<=0||heightPixels<=0)return;
         restShadow??=new RestShadow();var shape=DockMotion.Shape(widthPixels/dpiScale,heightPixels/dpiScale,radiusPixels/dpiScale,reveal);
         restShadow.Shape(widthPixels/dpiScale,heightPixels/dpiScale,radiusPixels/dpiScale,shape.Bounds,genie,Math.Max(0,alpha));
-        restShadow.Sync(window,bounds,dpiScale,showing&&alpha>.001&&(genie==null||genie.Progress>.0001));
+        restShadow.Sync(window,bounds,dpiScale,showing&&(genie==null||genie.Progress>.0001));
     }
     void ApplyReveal(){if(genie!=null)return;var (r,c)=DockMotion.Shape(widthPixels,heightPixels,radiusPixels,reveal);geometry.Offset=new Vector2((float)r.X,(float)r.Y);geometry.Size=new Vector2((float)r.Width,(float)r.Height);geometry.CornerRadius=new Vector2((float)c);}
     internal void Deform(GeniePose? pose,double scale)
     {
         if(!poseDirty&&Equals(genie,pose))return;
+        bool dirty=poseDirty;
         poseDirty=false;
         bool changing=(genie==null)!=(pose==null);
         genie=pose;
@@ -110,12 +118,20 @@ internal sealed class HostGlass:IDisposable
         if(inset>0){
             var topRow=pose.Row(0,true);var bottomRow=pose.Row(1,true);
             bool hasArea=pose.Progress>0.001&&(bottomRow.Y-topRow.Y)*scale>=2.0;
-            curveGeometry??=compositor.CreatePathGeometry();curveClip??=compositor.CreateGeometricClip(curveGeometry);
-            curveGeometry.Path=NativeContour.Build(pose,scale);root.Clip=curveClip;
-            var deformSize=new Vector2(widthPixels,(float)(pose.FrameHeight*scale));
-            root.Size=deformSize;backdrop.Size=deformSize;backdrop.IsVisible=hasArea;
-            foreach(var strip in ribbon)strip.IsVisible=false;
-            if(changing)SetWindowRgn(window,0,false);
+            if(changing||dirty||curveGeometry==null||curveClip==null)
+            {
+                curveGeometry??=compositor.CreatePathGeometry();curveClip??=compositor.CreateGeometricClip(curveGeometry);
+                curveGeometry.Path=NativeContour.Build(pose,scale);root.Clip=curveClip;
+                var deformSize=new Vector2(widthPixels,(float)(pose.FrameHeight*scale));
+                root.Size=deformSize;backdrop.Size=deformSize;backdrop.IsVisible=hasArea;
+                foreach(var strip in ribbon)strip.IsVisible=false;
+                if(changing)SetWindowRgn(window,0,false);
+            }
+            else
+            {
+                curveGeometry.Path=NativeContour.Build(pose,scale);
+                if(backdrop.IsVisible!=hasArea)backdrop.IsVisible=hasArea;
+            }
             RefreshShadow();return;
         }
         if(changing){root.Clip=null;backdrop.IsVisible=false;}
@@ -143,7 +159,35 @@ internal sealed class HostGlass:IDisposable
 #if MACDOCK_EXPERIENCE_CHECKS
         if(DiagnosticHideDrawer&&inset>0)visible=false;
 #endif
-        if(!visible){root.Opacity=0;restShadow?.Hide();if(showing)Native.ShowWindow(window,0);showing=false;return;}root.Opacity=Math.Max(0,alpha);Native.GetWindowRect(front,out var r);int padding=(int)Math.Round(inset*dpiScale);r.Left+=padding;r.Top+=padding;r.Right-=padding;r.Bottom-=padding;if(showing&&r.Equals(bounds)&&GetWindow(front,2)==window)return;uint flags=0x50;if(showing&&r.Right-r.Left==bounds.Right-bounds.Left&&r.Bottom-r.Top==bounds.Bottom-bounds.Top)flags|=1;Native.SetWindowPos(window,front,r.Left,r.Top,r.Right-r.Left,r.Bottom-r.Top,flags);bounds=r;showing=true;RefreshShadow();}
+        if(!visible){root.Opacity=0;restShadow?.Hide();if(showing)Native.ShowWindow(window,0);showing=false;return;}
+        root.Opacity=Math.Max(0,alpha);
+        Native.GetWindowRect(front,out var r);
+        int padding=(int)Math.Round(inset*dpiScale);
+        r.Left+=padding;r.Top+=padding;r.Right-=padding;r.Bottom-=padding;
+        bool needWindowZ=!showing||GetWindow(front,2)!=window;
+        bool sameWindowBounds=showing&&r.Equals(bounds);
+        int w=r.Right-r.Left,h=r.Bottom-r.Top;
+        uint winFlags=(needWindowZ?0u:0x0004u)|(showing&&w==bounds.Right-bounds.Left&&h==bounds.Bottom-bounds.Top?0x0001u:0u)|0x0400u;
+        if(!showing)winFlags|=0x0040u;
+        bounds=r;showing=true;
+        bool needWindow=!sameWindowBounds||needWindowZ;
+        if(needWindow&&needWindowZ)restShadow?.InvalidateZOrder();
+        bool needShadow=false;
+        nint shadowHwnd=0;int sx=0,sy=0,sw=0,sh=0;uint sFlags=0;
+        if(inset==0&&widthPixels>0&&heightPixels>0)
+        {
+            restShadow??=new RestShadow();
+            var shape=DockMotion.Shape(widthPixels/dpiScale,heightPixels/dpiScale,radiusPixels/dpiScale,reveal);
+            restShadow.Shape(widthPixels/dpiScale,heightPixels/dpiScale,radiusPixels/dpiScale,shape.Bounds,genie,Math.Max(0,alpha));
+            needShadow=restShadow.PreparePlacement(window,bounds,dpiScale,showing&&(genie==null||genie.Progress>.0001),out shadowHwnd,out sx,out sy,out sw,out sh,out sFlags);
+        }
+        if(needWindow&&needShadow)
+            Native.DeferWindowPosPair(window,front,r.Left,r.Top,w,h,winFlags,shadowHwnd,window,sx,sy,sw,sh,sFlags);
+        else if(needWindow)
+            Native.DeferWindowPosAsync(window,front,r.Left,r.Top,w,h,winFlags);
+        else if(needShadow)
+            Native.DeferWindowPosAsync(shadowHwnd,window,sx,sy,sw,sh,sFlags);
+    }
     internal void Opacity(double value){float next=(float)Math.Clamp(value,0,1);if(next==alpha)return;alpha=next;root.Opacity=showing?next:0;RefreshShadow();}
     internal static void ShutdownQueue()
     {

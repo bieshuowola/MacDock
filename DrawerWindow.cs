@@ -6,6 +6,7 @@ using System.Windows.Interop;
 using System.Windows.Media;
 using System.Windows.Media.Animation;
 using System.Windows.Media.Imaging;
+using System.Windows.Threading;
 using Brushes = System.Windows.Media.Brushes;
 using Color = System.Windows.Media.Color;
 using Point = System.Windows.Point;
@@ -58,6 +59,7 @@ internal sealed class DrawerWindow : GlassWindow
             pinBtn.Effect = null;
             Theme.Tip(pinBtn, "锁定抽屉（防止点击外部自动收起）");
         }
+        InvalidatePrebakedSurface();
     }
     readonly SmoothScrollViewer scroll;
     internal SmoothScrollViewer Scroller=>scroll;
@@ -67,6 +69,9 @@ internal sealed class DrawerWindow : GlassWindow
     internal void SetEntranceScale(double value){entrance.ScaleX=value;entrance.ScaleY=value;}
     GenieVisual? genie;
     Border? bakedGenieSurface;
+    RenderTargetBitmap? prebakedBitmap;
+    bool prebakedDirty = true, prebakeQueued, windowClosed;
+    double prebakedWidth, prebakedHeight, prebakedScale;
     bool deforming,meshAttached;double genieWidth,genieHeight,genieFrame;
     GeniePose? prevDeformPose;
     Layout? appliedLayout;
@@ -190,39 +195,77 @@ internal sealed class DrawerWindow : GlassWindow
         owner.DrawerLayerFrame?.Invoke("end-after-layout",MaterialSnapshot);
     }
 
-    FrameworkElement BakeGenieSurface()
+    internal void InvalidatePrebakedSurface(bool scheduleIdleWarm = true)
     {
-        var live=Surface!;
-        double w=Math.Max(1,PanelWidth);
-        double h=Math.Max(1,PanelHeight);
-        if(!live.IsArrangeValid||Math.Abs(live.RenderSize.Width-w)>0.5||Math.Abs(live.RenderSize.Height-h)>0.5)
+        prebakedDirty = true;
+        prebakedBitmap = null;
+        if (scheduleIdleWarm && !deforming && !windowClosed && !prebakeQueued)
         {
-            var size=new Size(w,h);
+            prebakeQueued = true;
+            Dispatcher.BeginInvoke(DispatcherPriority.ApplicationIdle, new Action(WarmPrebakedSurface));
+        }
+    }
+
+    internal void WarmPrebakedSurface()
+    {
+        prebakeQueued = false;
+        if (deforming || windowClosed || Surface == null) return;
+        double w = Math.Max(1, PanelWidth);
+        double h = Math.Max(1, PanelHeight);
+        double scale = Math.Max(1, owner.Scale);
+        if (!prebakedDirty && prebakedBitmap != null &&
+            Math.Abs(prebakedWidth - w) < 0.1 &&
+            Math.Abs(prebakedHeight - h) < 0.1 &&
+            Math.Abs(prebakedScale - scale) < 0.001)
+            return;
+
+        var live = Surface;
+        if (!live.IsArrangeValid || Math.Abs(live.RenderSize.Width - w) > 0.5 || Math.Abs(live.RenderSize.Height - h) > 0.5)
+        {
+            var size = new Size(w, h);
             live.Measure(size);
             live.Arrange(new Rect(size));
             live.UpdateLayout();
         }
-        double scale=Math.Max(1,owner.Scale);
-        int pxW=Math.Max(1,(int)Math.Round(w*scale));
-        int pxH=Math.Max(1,(int)Math.Round(h*scale));
-        double dpi=96.0*scale;
-        var dv=new DrawingVisual();
-        using(var dc=dv.RenderOpen())
+        int pxW = Math.Max(1, (int)Math.Round(w * scale));
+        int pxH = Math.Max(1, (int)Math.Round(h * scale));
+        double dpi = 96.0 * scale;
+        var dv = new DrawingVisual();
+        using (var dc = dv.RenderOpen())
         {
-            var vb=new VisualBrush(live)
+            var vb = new VisualBrush(live)
             {
-                Stretch=Stretch.None,
-                AlignmentX=AlignmentX.Left,
-                AlignmentY=AlignmentY.Top,
-                Viewbox=new Rect(0,0,w,h),
-                ViewboxUnits=BrushMappingMode.Absolute
+                Stretch = Stretch.None,
+                AlignmentX = AlignmentX.Left,
+                AlignmentY = AlignmentY.Top,
+                Viewbox = new Rect(0, 0, w, h),
+                ViewboxUnits = BrushMappingMode.Absolute
             };
-            dc.DrawRectangle(vb,null,new Rect(0,0,w,h));
+            dc.DrawRectangle(vb, null, new Rect(0, 0, w, h));
         }
-        var rtb=new RenderTargetBitmap(pxW,pxH,dpi,dpi,PixelFormats.Pbgra32);
+        var rtb = new RenderTargetBitmap(pxW, pxH, dpi, dpi, PixelFormats.Pbgra32);
         rtb.Render(dv);
         rtb.Freeze();
-        var brush=new ImageBrush(rtb)
+        prebakedBitmap = rtb;
+        prebakedWidth = w;
+        prebakedHeight = h;
+        prebakedScale = scale;
+        prebakedDirty = false;
+    }
+
+    FrameworkElement BakeGenieSurface()
+    {
+        double w=Math.Max(1,PanelWidth);
+        double h=Math.Max(1,PanelHeight);
+        double scale=Math.Max(1,owner.Scale);
+        if(prebakedBitmap==null||prebakedDirty||
+            Math.Abs(prebakedWidth-w)>=0.1||Math.Abs(prebakedHeight-h)>=0.1||
+            Math.Abs(prebakedScale-scale)>=0.001)
+        {
+            prebakedDirty=true;
+            WarmPrebakedSurface();
+        }
+        var brush=new ImageBrush(prebakedBitmap!)
         {
             Stretch=Stretch.Fill,
             TileMode=TileMode.None,
@@ -248,6 +291,9 @@ internal sealed class DrawerWindow : GlassWindow
             bakedGenieSurface.Background=null;
             bakedGenieSurface=null;
         }
+        prebakedBitmap=null;
+        prebakedDirty=true;
+        if(!windowClosed)InvalidatePrebakedSurface(scheduleIdleWarm:true);
     }
     readonly Border segment;
     readonly DockPanel toolbar,footer;
@@ -579,6 +625,10 @@ internal sealed class DrawerWindow : GlassWindow
             return 0;
         });
         Deactivated += (_, _) => Dispatcher.BeginInvoke(()=>c.DrawerFocusChanged());
+        scroll.ScrollChanged += (_, e) => { if (Math.Abs(e.VerticalChange) > 0.1) InvalidatePrebakedSurface(); };
+        void OnThemeChanged() => InvalidatePrebakedSurface();
+        Theme.Changed += OnThemeChanged;
+        Closed += (_, _) => { windowClosed = true; Theme.Changed -= OnThemeChanged; };
         ApplyLayout();
     }
 
@@ -607,10 +657,11 @@ internal sealed class DrawerWindow : GlassWindow
         toolbar.Height=l.ToolbarHeight;searchHost.Height=l.SearchHeight;footer.Height=l.FooterHeight;
         gap1.Height=0;gap2.Height=16*l.Unit;gap3.Height=10*l.Unit;
         searchHost.Width=Math.Clamp(PanelWidth-l.Chrome*2-210,0,280);
+        InvalidatePrebakedSurface();
     }
 
     public void Prepare() { ApplyLayout(); Render();scroll.ResetScroll(); }
-    internal void PrepareForOpen(){ApplyLayout();scroll.ResetScroll();Surface?.InvalidateVisual();}
+    internal void PrepareForOpen(){ApplyLayout();scroll.ResetScroll();WarmPrebakedSurface();}
     void UseFlatSurface()
     {
         stage.Clip=null;
@@ -725,7 +776,13 @@ internal sealed class DrawerWindow : GlassWindow
         if(ensureVisible&&cursorId!=null)EnsureVisible(cursorId);
     }
     internal void SelectAll() { selected.Clear(); foreach (var e in visibleOrder) selected.Add(e.Id); cursorId??=visibleOrder.FirstOrDefault()?.Id; ApplySelectionVisuals(); }
-    internal void ClearSelection() { selected.Clear(); anchor=null; cursorId=null; ApplySelectionVisuals(); }
+    internal void ClearSelection()
+    {
+        bool had = selected.Count > 0 || anchor != null || cursorId != null;
+        selected.Clear(); anchor = null; cursorId = null;
+        if (had) ApplySelectionVisuals();
+        else UpdateFooter();
+    }
 
     internal Entry? DropTargetEntry { get; private set; }
     Border? dropTargetTile;
@@ -795,6 +852,7 @@ internal sealed class DrawerWindow : GlassWindow
     {
         foreach(var tile in tiles.Values)PaintTile(tile);
         UpdateFooter();
+        InvalidatePrebakedSurface();
     }
 
     void UpdateFooter()
@@ -1095,6 +1153,7 @@ internal sealed class DrawerWindow : GlassWindow
         if (!IsVisible && meshAttached) Surface?.InvalidateVisual();
         groups.BeginAnimation(OpacityProperty, null);
         groups.Opacity = 1;
+        InvalidatePrebakedSurface();
     }
 
     void ConfigureListViewTile(Border tile, Layout l)
