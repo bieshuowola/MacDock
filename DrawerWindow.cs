@@ -72,11 +72,7 @@ internal sealed class DrawerWindow : GlassWindow
     readonly Grid stage=new(){ClipToBounds=true};
     protected override UIElement? ForegroundOpacityTarget=>stage;
     readonly SoftContour contour=new();
-#if MACDOCK_EXPERIENCE_CHECKS
-    readonly bool shareShadow=Environment.GetEnvironmentVariable("MACDOCK_GENIE_SHARED_SHADOW")!="0";
-#else
-    readonly bool shareShadow=true;
-#endif
+    readonly bool shareShadow=false;
     readonly GatewayVisual gatewayRibbon=new();
     internal override double MaterialInset=>SoftContour.Pad;
     internal double PanelWidth=>Math.Max(0,Width-2*MaterialInset);
@@ -138,6 +134,7 @@ internal sealed class DrawerWindow : GlassWindow
         var hostPose = !deforming ? pose : (prevDeformPose ?? pose);
         prevDeformPose = pose;
         deforming=true;CurrentPose=pose;SetMaterialGenie(hostPose);
+        stage.Clip=new RectangleGeometry(new Rect(-MaterialInset,0,PanelWidth+2*MaterialInset,Math.Max(0,pose.Row(1).Y-0.5)));
         owner.DrawerLayerFrame?.Invoke("begin-after-resize",MaterialSnapshot);
         if(!meshAttached&&Surface!=null)
         {
@@ -555,6 +552,7 @@ internal sealed class DrawerWindow : GlassWindow
     internal void PrepareForOpen(){ApplyLayout();scroll.ResetScroll();Surface?.InvalidateVisual();}
     void UseFlatSurface()
     {
+        stage.Clip=null;
         ConfigureSurfaceGeometry(1, clipToStage: true);
         genie?.DetachShadow();
         if(meshAttached)
