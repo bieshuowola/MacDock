@@ -724,7 +724,7 @@ internal static class ExperienceChecks
                 if(mode=="open")
                 {
                     openFrames.Add((cycle,phase,fgOpacity,ms));
-                    if(cycle==1&&!midCaptured&&phase>=0.18&&phase<=0.82&&c.Drawer is {IsVisible:true} d&&d.CurrentPose is {} pose)
+                    if(cycle==1&&!midCaptured&&phase>=0.45&&phase<=0.78&&c.Drawer is {IsVisible:true} d&&d.CurrentPose is {} pose)
                     {
                         midCaptured=true;
                         var body=d.BodyBounds;
@@ -778,6 +778,18 @@ internal static class ExperienceChecks
                             for(int k=1;k<luma.Count-1;k++)
                             {
                                 if(luma[k]>luma[k-1]+8&&luma[k]>luma[k+1]+8)bottomHaloDetected=true;
+                            }
+                            var innerLuma=new List<int>();
+                            for(int dy=-12;dy<=2;dy++)
+                            {
+                                int py=Math.Clamp((yBottom-capY)+dy,0,capH-1);
+                                var px=bmp.GetPixel(cx,py);
+                                innerLuma.Add((px.R+px.G+px.B)/3);
+                            }
+                            bottomEdgeSample+="|in:"+string.Join(",",innerLuma);
+                            for(int k=1;k<innerLuma.Count-1;k++)
+                            {
+                                if(innerLuma[k]>innerLuma[k-1]+12&&innerLuma[k]>innerLuma[k+1]+12)bottomHaloDetected=true;
                             }
                         }
                     }

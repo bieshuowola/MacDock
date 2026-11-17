@@ -5,11 +5,11 @@
   - 右键零转圈：按下抢先替换 `32650`+`32514`，`ShellMenu` 钩子拦 `0x20/0x117/0x121`，1500ms 防抖还原。
   - 单击多选归档：`Native.IsControlDown/IsShiftDown`（三态合检）+`selectionHandled` 防穿透；多选拖拽渲染扑克牌叠牌+角标，命中 65% 中心暂停换位高亮归档，拖出边界转原生 `FileDrop`；网格区支持橡皮筋框选。
   - 全局接收与图钉锁：外部 `FileDrop`/`Bitmap` 唤醒即锁 `ExternalFileDragActive`（350ms 逃生），Dock 空白直达桌面；`InternalDropProtected` 防 `ShellOps` 失焦收起；`DrawerPinned` 纯 `#18000000` 阴影无蓝框，启动/`×`/Esc/全屏自动解锁。
-  - 渲染与抗锯齿加固：`Timeline.DesiredFrameRateProperty` 匹配物理屏最高刷新率（抽屉 2K 165Hz ~161fps/~164fps）；主 Dock 移除 `HostGlass` 静止态 `CreateRoundRectRgn`/`SetWindowRgn` 硬裁剪、`glassTint` 升级为 16x 超采样 `CoverageBorder` 并移入 `glassLayer` 防重排；`RestShadow` 改用 24 段平滑圆角 `SoftContour`；`NativeContour.Build` 极扁首帧夹紧消除白背景重影；`RefreshDesktop`/Shell `0x8000` 保留未变更图标缓存不闪烁；测试态隔离 Mutex、禁弹窗并显式 `Environment.Exit`。
+  - 渲染与抗锯齿加固：`Timeline.DesiredFrameRateProperty` 匹配物理屏最高刷新率（抽屉 2K 165Hz ~164.5fps/~161.2fps）；主 Dock 移除 `HostGlass` 静止态 `CreateRoundRectRgn`/`SetWindowRgn` 硬裁剪、`glassTint` 升级为 16x 超采样 `CoverageBorder` 并移入 `glassLayer` 防重排；`RestShadow` 改用 24 段平滑圆角 `SoftContour`；`NativeContour.Build` 底边 `bottomInsetPx=0f` 与前景 1:1 重合，彻底消除 Genie 变形期间底边亮白横线与透底夹缝；`RefreshDesktop`/Shell `0x8000` 保留未变更图标缓存不闪烁；测试态隔离 Mutex、禁弹窗并显式 `Environment.Exit`。
 ## 2. 源码地图
 - `Program.cs`：主控、高刷帧率解锁、测试态 Mutex/异常隔离、局部图标刷新、`DropFilesToDesktop`。
 - `DockWindow.cs`/`DrawerWindow.cs`：`CoverageBorder` 抗锯齿圆角、`glassLayer` 隔离重排、增量 Diff & Patch、图钉锁。
-- `HostGlass.cs`/`CoverageBorder.cs`/`NativeContour.cs`/`RestShadow.cs`：全 Per-Pixel Alpha 圆角合成、首帧安全夹紧、24 段 `SoftContour`。
+- `HostGlass.cs`/`CoverageBorder.cs`/`NativeContour.cs`/`RestShadow.cs`：全 Per-Pixel Alpha 圆角合成、底边 1:1 对齐、24 段 `SoftContour`。
 - `PointerSort.cs`/`Native.cs`/`ShellMenu.cs`/`ShellOps.cs`：叠牌外拖、缓存键 `(Path,Ticks,Length,Px,Stamp)`、`IFileOperation`。
 - `ExperienceChecks.cs`：`--icon-test`、`--drawer-paste-reuse-test`、`--drawer-stability-test`、`--dock-stability-test`、`--external-drop-pin-test`。
 ## 3. 红线约束

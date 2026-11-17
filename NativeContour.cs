@@ -87,8 +87,8 @@ internal static unsafe class NativeContour
     static readonly Vector2[] sharedPoints=new Vector2[(GeniePose.Rows+1)*2];
     internal static CompositionPath Build(GeniePose pose,double scale)
     {
-        const float insetPx=0.75f;
-        const float bottomInsetPx=1.5f;
+        const float insetPx=0.25f;
+        const float bottomInsetPx=0.0f;
         float topY=(float)(pose.Row(0,true).Y*scale)+insetPx;
         float botY=(float)(pose.Row(GeniePose.RowT(GeniePose.Rows),true).Y*scale)-bottomInsetPx;
         bool collapsed=botY<=topY+0.5f;
