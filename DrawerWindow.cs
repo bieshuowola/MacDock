@@ -304,7 +304,7 @@ internal sealed class DrawerWindow : GlassWindow
     readonly Dictionary<string, Border> tiles = new(StringComparer.Ordinal);
     readonly List<Entry> visibleOrder = new();
     bool renderedListView;
-    double renderedUnit;
+    double renderedUnit, renderedScale;
     bool dropPreviewActive;
     Entry? anchor;
     bool updating;
@@ -628,7 +628,7 @@ internal sealed class DrawerWindow : GlassWindow
         });
         Deactivated += (_, _) => Dispatcher.BeginInvoke(()=>c.DrawerFocusChanged());
         DpiChanged += (_, _) => { InvalidateDpiCache(); InvalidatePrebakedSurface(); ApplyLayout(); Render(); };
-        AddHandler(DragDrop.DragEnterEvent, new DragEventHandler((_, a) => { dropPreviewActive = true; Native.DropPreviewHelper.DragEnter(Handle, a); }), true);
+        AddHandler(DragDrop.DragEnterEvent, new DragEventHandler((_, a) => { if (!dropPreviewActive) { dropPreviewActive = true; Native.DropPreviewHelper.DragEnter(Handle, a); } else Native.DropPreviewHelper.DragOver(a); }), true);
         AddHandler(DragDrop.DragOverEvent, new DragEventHandler((_, a) => { if (!dropPreviewActive) { dropPreviewActive = true; Native.DropPreviewHelper.DragEnter(Handle, a); } else Native.DropPreviewHelper.DragOver(a); }), true);
         AddHandler(DragDrop.DragLeaveEvent, new DragEventHandler((_, _) => { if (dropPreviewActive && (!Native.GetCursorPos(out var p) || !Contains(p))) { dropPreviewActive = false; Native.DropPreviewHelper.DragLeave(); } }), true);
         AddHandler(DragDrop.DropEvent, new DragEventHandler((_, a) => { dropPreviewActive = false; Native.DropPreviewHelper.Drop(a); }), true);
@@ -649,6 +649,20 @@ internal sealed class DrawerWindow : GlassWindow
         return grid;
     }
 
+    (double TileW, double GapX, double GridW, double Chrome) GridMetrics(Layout l)
+    {
+        double scale = Math.Max(1, owner.Scale);
+        double chrome = Math.Round(l.Chrome * scale) / scale;
+        double panelW = Math.Round(l.DrawerWidth * scale) / scale;
+        double innerW = Math.Max(0, panelW - 2 * chrome);
+        int cols = Math.Max(1, l.Columns);
+        double tileW = Math.Floor(l.DrawerTile * scale) / scale;
+        double rawGap = cols > 1 ? Math.Floor(((innerW - l.ScrollReserve - cols * tileW) / (cols - 1)) * scale) / scale : 0;
+        double gapX = Math.Max(0, rawGap);
+        double gridW = cols * tileW + Math.Max(0, cols - 1) * gapX;
+        return (tileW, gapX, gridW, chrome);
+    }
+
     public void ApplyLayout()
     {
         var l = owner.Layout;
@@ -658,14 +672,15 @@ internal sealed class DrawerWindow : GlassWindow
         appliedLayout=l;appliedScale=owner.Scale;
         Width = Math.Round(l.DrawerWidth*owner.Scale)/owner.Scale+2*MaterialInset; Height = FrameHeight+2*MaterialInset;
         UseFlatSurface();
+        var (_, _, gridW, chrome) = GridMetrics(l);
         scroll.Height = l.GridHeight;
-        main.Margin = new Thickness(l.Chrome, l.DrawerPadTop, l.Chrome, l.DrawerPadBottom);
+        main.Margin = new Thickness(chrome, l.DrawerPadTop, chrome, l.DrawerPadBottom);
         search.Height = l.SearchHeight;
         search.FontSize=placeholder.FontSize=Math.Clamp(13*l.Unit,13,15);count.FontSize=Math.Clamp(12*l.Unit,12,14);
         toolbar.Height=l.ToolbarHeight;searchHost.Height=l.SearchHeight;footer.Height=l.FooterHeight;
         gap1.Height=0;gap2.Height=16*l.Unit;gap3.Height=10*l.Unit;
-        searchHost.Width=Math.Clamp(PanelWidth-l.Chrome*2-210,0,280);
-        groups.Width = owner.Store.Data.ListView ? double.NaN : Math.Max(0, l.Columns * (l.DrawerTile + l.GapX) - l.GapX);
+        searchHost.Width=Math.Clamp(PanelWidth-chrome*2-210,0,280);
+        groups.Width = owner.Store.Data.ListView ? double.NaN : gridW;
         groups.HorizontalAlignment = owner.Store.Data.ListView ? HorizontalAlignment.Stretch : HorizontalAlignment.Center;
         InvalidatePrebakedSurface();
     }
@@ -997,14 +1012,16 @@ internal sealed class DrawerWindow : GlassWindow
             .Concat(Alphabet.Groups(entries.Where(e => e.Source == "manual"), owner.Store.Data.Mode).Select(g => (Key: "manual:" + g.Key, Title: "手动添加 · 快捷入口" + (g.Key.Length > 0 ? " · " + g.Key : ""), Items: g.ToArray())))
             .ToList();
 
-        if (renderedListView != listView || Math.Abs(renderedUnit - l.Unit) > 0.001)
+        var (tileW, gapX, gridW, _) = GridMetrics(l);
+        if (renderedListView != listView || Math.Abs(renderedUnit - l.Unit) > 0.001 || Math.Abs(renderedScale - owner.Scale) > 0.001)
         {
             groups.Children.Clear();
             tiles.Clear();
             renderedListView = listView;
             renderedUnit = l.Unit;
+            renderedScale = owner.Scale;
         }
-        groups.Width = listView ? double.NaN : Math.Max(0, l.Columns * (l.DrawerTile + l.GapX) - l.GapX);
+        groups.Width = listView ? double.NaN : gridW;
         groups.HorizontalAlignment = listView ? HorizontalAlignment.Stretch : HorizontalAlignment.Center;
 
         // Build lookup of existing tile controls by file path (primary) and entry ID (fallback)
@@ -1077,7 +1094,7 @@ internal sealed class DrawerWindow : GlassWindow
             {
                 wrap = new WrapPanel { Orientation = Orientation.Horizontal, ItemWidth = double.NaN, Tag = group.Key };
             }
-            wrap.Margin = new Thickness(0, 0, -l.GapX, 0);
+            wrap.Margin = new Thickness(0, 0, -gapX, 0);
 
             for (int i = 0; i < group.Items.Length; i++)
             {
@@ -1095,6 +1112,12 @@ internal sealed class DrawerWindow : GlassWindow
                     }
                     if (listView)
                         ConfigureListViewTile(tile, l);
+                    else
+                    {
+                        tile.Width = tileW;
+                        tile.Height = l.DrawerTileHeight;
+                        tile.Margin = new Thickness(0, 0, gapX, l.RowHeight - l.DrawerTileHeight);
+                    }
                     if (tile.Parent == wrap)
                     {
                         int cur = wrap.Children.IndexOf(tile);
@@ -1114,6 +1137,12 @@ internal sealed class DrawerWindow : GlassWindow
                 {
                     tile = (Border)owner.Dock.Tile(e, true);
                     if (listView) ConfigureListViewTile(tile, l);
+                    else
+                    {
+                        tile.Width = tileW;
+                        tile.Height = l.DrawerTileHeight;
+                        tile.Margin = new Thickness(0, 0, gapX, l.RowHeight - l.DrawerTileHeight);
+                    }
                     wrap.Children.Insert(i, tile);
                 }
                 tiles[e.Id] = tile;

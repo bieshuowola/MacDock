@@ -63,7 +63,7 @@ internal sealed class DockWindow : GlassWindow
         Height = c.Layout.DockHeight;
         DragOver += BlankOver; Drop += BlankDrop;
         bool dropPreviewActive=false;
-        AddHandler(DragDrop.DragEnterEvent,new DragEventHandler((_,a)=>{dropPreviewActive=true;Native.DropPreviewHelper.DragEnter(Handle,a);}),true);
+        AddHandler(DragDrop.DragEnterEvent,new DragEventHandler((_,a)=>{if(!dropPreviewActive){dropPreviewActive=true;Native.DropPreviewHelper.DragEnter(Handle,a);}else Native.DropPreviewHelper.DragOver(a);}),true);
         AddHandler(DragDrop.DragOverEvent,new DragEventHandler((_,a)=>{if(!dropPreviewActive){dropPreviewActive=true;Native.DropPreviewHelper.DragEnter(Handle,a);}else Native.DropPreviewHelper.DragOver(a);}),true);
         AddHandler(DragDrop.DragLeaveEvent,new DragEventHandler((_,_)=>{if(dropPreviewActive&&(!Native.GetCursorPos(out var p)||!Contains(p))){dropPreviewActive=false;Native.DropPreviewHelper.DragLeave();}}),true);
         AddHandler(DragDrop.DropEvent,new DragEventHandler((_,a)=>{dropPreviewActive=false;Native.DropPreviewHelper.Drop(a);}),true);

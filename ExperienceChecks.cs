@@ -855,9 +855,39 @@ internal static class ExperienceChecks
             if(bottomHaloDetected)
                 throw new InvalidOperationException($"Bottom edge double-line halo detected on white backdrop: luma[1..6]={bottomEdgeSample}");
 
+            // Verify full-row horizontal centering symmetry (|leftMargin - rightMargin| <= 2px)
+            int needCols=c.Layout.Columns;
+            for(int k=c.Store.Data.Entries.Count(e=>e.InDrawer);k<needCols;k++)
+            {
+                var fp=Path.Combine(rootDir,$"sym_{k}.txt");
+                File.WriteAllText(fp,k.ToString());
+                c.Store.Data.Entries.Add(new Entry{Path=fp,Name=$"项目{k+1}",Source="desktop",AutoName=false});
+            }
+            c.Drawer!.Render();
+            c.ToggleDrawer();
+            for(int w=0;w<60&&(c.Drawer?.IsVisible!=true||c.DrawerMotionRunning||c.DrawerProgress<0.99);w++)await Task.Delay(25);
+            c.SettleDrawerMotion();
+            c.Drawer.UpdateLayout();
+            var dSym=c.Drawer;
+            int measuredCols=dSym.MeasuredColumns();
+            var rowTiles=dSym.SortTiles(false).Take(measuredCols).ToArray();
+            if(measuredCols!=needCols||rowTiles.Length<needCols)
+                throw new InvalidOperationException($"Expected {needCols} columns in drawer grid, got {measuredCols}");
+            var bodySym=dSym.BodyBounds;
+            var firstLeftPt=rowTiles[0].PointToScreen(new Point(0,0));
+            var lastRightPt=rowTiles[^1].PointToScreen(new Point(rowTiles[^1].ActualWidth,0));
+            double leftMarginPx=firstLeftPt.X-bodySym.Left;
+            double rightMarginPx=bodySym.Right-lastRightPt.X;
+            double asymPx=Math.Abs(leftMarginPx-rightMarginPx);
+            Save("drawer-symmetry.png",new System.Drawing.Rectangle(bodySym.Left,bodySym.Top,bodySym.Right-bodySym.Left,Math.Min(260,bodySym.Bottom-bodySym.Top)));
+            c.CloseDrawer(keepDock:true,force:true);
+            for(int w=0;w<40&&(c.Drawer?.IsVisible==true||c.DrawerMotionRunning);w++)await Task.Delay(25);
+            if(asymPx>2.0)
+                throw new InvalidOperationException($"Drawer grid not horizontally centered: cols={measuredCols}, leftMarginPx={leftMarginPx:F1}, rightMarginPx={rightMarginPx:F1}, diff={asymPx:F1}px");
+
             pass=true;
             double cpuAvg=cpuFrameMs.Count>0?cpuFrameMs.Average():0,cpuMax=cpuFrameMs.Count>0?cpuFrameMs.Max():0;
-            detail=$"display={area.Width}x{area.Height}@{refreshHz}Hz(budget={frameBudgetMs:F2}ms), cpu[n={cpuFrameMs.Count},avg={cpuAvg:F2}ms,max={cpuMax:F2}ms], open[n={openFrames.Count},avg={openStat.Avg:F2}ms,p95={openStat.P95:F2}ms,max={openStat.Max:F2}ms,fps={openStat.Fps:F1},drop={openStat.Dropped}], close[n={closeFrames.Count},avg={closeStat.Avg:F2}ms,p95={closeStat.P95:F2}ms,max={closeStat.Max:F2}ms,fps={closeStat.Fps:F1},drop={closeStat.Dropped}], bottomLuma1to6=[{bottomEdgeSample}], thumbMaxPx={iconEntries.Max(e=>((System.Windows.Media.Imaging.BitmapSource)e.Image!).PixelWidth)}";
+            detail=$"display={area.Width}x{area.Height}@{refreshHz}Hz(budget={frameBudgetMs:F2}ms), cols={measuredCols}, leftPx={leftMarginPx:F1}, rightPx={rightMarginPx:F1}, asymPx={asymPx:F2}, cpu[n={cpuFrameMs.Count},avg={cpuAvg:F2}ms,max={cpuMax:F2}ms], open[n={openFrames.Count},avg={openStat.Avg:F2}ms,p95={openStat.P95:F2}ms,max={openStat.Max:F2}ms,fps={openStat.Fps:F1},drop={openStat.Dropped}], close[n={closeFrames.Count},avg={closeStat.Avg:F2}ms,p95={closeStat.P95:F2}ms,max={closeStat.Max:F2}ms,fps={closeStat.Fps:F1},drop={closeStat.Dropped}], bottomLuma1to6=[{bottomEdgeSample}], thumbMaxPx={iconEntries.Max(e=>((System.Windows.Media.Imaging.BitmapSource)e.Image!).PixelWidth)}";
         }
         catch(Exception ex)
         {

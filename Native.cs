@@ -816,11 +816,11 @@ internal class DragDropHelper { }
 [ComImport,Guid("4657278B-411B-11d2-839A-00C04FD918D0"),InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
 internal interface IDropTargetHelper
 {
-    void DragEnter(nint hwndTarget,[MarshalAs(UnmanagedType.Interface)] ComData dataObject,ref Native.Point pt,uint effect);
-    void DragLeave();
-    void DragOver(ref Native.Point pt,uint effect);
-    void Drop([MarshalAs(UnmanagedType.Interface)] ComData dataObject,ref Native.Point pt,uint effect);
-    void Show([MarshalAs(UnmanagedType.Bool)] bool show);
+    [PreserveSig] int DragEnter(nint hwndTarget,[MarshalAs(UnmanagedType.Interface)] ComData dataObject,ref Native.Point pt,uint effect);
+    [PreserveSig] int DragLeave();
+    [PreserveSig] int DragOver(ref Native.Point pt,uint effect);
+    [PreserveSig] int Drop([MarshalAs(UnmanagedType.Interface)] ComData dataObject,ref Native.Point pt,uint effect);
+    [PreserveSig] int Show([MarshalAs(UnmanagedType.Bool)] bool show);
 }
 internal static partial class Native
 {
@@ -836,7 +836,14 @@ internal static partial class Native
         internal static void DragEnter(nint hwnd,System.Windows.DragEventArgs e)
         {
             if(hwnd==0||e.Data is not ComData com)return;
-            try{GetCursorPos(out var pt);Instance?.DragEnter(hwnd,com,ref pt,(uint)e.Effects);}
+            try
+            {
+                GetCursorPos(out var pt);
+                var helper=Instance;
+                if(helper==null)return;
+                helper.DragEnter(hwnd,com,ref pt,(uint)e.Effects);
+                helper.Show(true);
+            }
             catch{}
         }
         internal static void DragOver(System.Windows.DragEventArgs e)
