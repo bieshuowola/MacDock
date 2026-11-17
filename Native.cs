@@ -206,10 +206,39 @@ internal static partial class Native
     [DllImport("user32.dll")] internal static extern bool EndDeferWindowPos(nint winPosInfo);
     [DllImport("winmm.dll")] internal static extern uint timeBeginPeriod(uint period);
     [DllImport("winmm.dll")] internal static extern uint timeEndPeriod(uint period);
+    internal static nint FindActiveSysDragImage()
+    {
+        for(nint h=FindWindowEx(0,0,"SysDragImage",null);h!=0;h=FindWindowEx(0,h,"SysDragImage",null))
+        {
+            if(IsWindowVisible(h)&&(GetWindowLongPtr(h,-20).ToInt64()&0x8)!=0)return h;
+        }
+        return 0;
+    }
+    internal static nint TopmostInsertAfter(nint selfHwnd)
+    {
+        if(PointerSort.Active?.GhostHandle is nint gh&&gh!=0&&gh!=selfHwnd&&IsWindowVisible(gh))return gh;
+        if(DropPreviewHelper.IsActive||FindActiveSysDragImage()!=0)
+        {
+            nint di=FindActiveSysDragImage();
+            if(di!=0&&di!=selfHwnd)return di;
+        }
+        return new nint(-1);
+    }
+    internal static bool IsWindowAbove(nint upper,nint lower)
+    {
+        if(upper==0||lower==0||upper==lower)return false;
+        for(nint h=GetWindow(lower,3);h!=0;h=GetWindow(h,3))
+        {
+            if(h==upper)return true;
+        }
+        return false;
+    }
     internal static void DeferWindowPosAsync(nint hwnd,nint after,int x,int y,int cx,int cy,uint flags)
     {
         if(hwnd==0)return;
-        uint f=flags|0x4210u; // SWP_ASYNCWINDOWPOS | SWP_NOOWNERZORDER | SWP_NOACTIVATE
+        // All MacDock windows live on the UI thread; synchronous BeginDeferWindowPos/EndDeferWindowPos
+        // commits geometry and Z-order in one atomic DWM frame without SWP_ASYNCWINDOWPOS Z-order races.
+        uint f=flags|0x0210u; // SWP_NOOWNERZORDER | SWP_NOACTIVATE
         nint hdwp=BeginDeferWindowPos(1);
         if(hdwp!=0)
         {
@@ -222,7 +251,7 @@ internal static partial class Native
     {
         if(hwnd1==0){DeferWindowPosAsync(hwnd2,after2,x2,y2,cx2,cy2,flags2);return;}
         if(hwnd2==0){DeferWindowPosAsync(hwnd1,after1,x1,y1,cx1,cy1,flags1);return;}
-        const uint baseFlags=0x4210u; // SWP_ASYNCWINDOWPOS | SWP_NOOWNERZORDER | SWP_NOACTIVATE
+        const uint baseFlags=0x0210u; // SWP_NOOWNERZORDER | SWP_NOACTIVATE
         nint hdwp=BeginDeferWindowPos(2);
         if(hdwp!=0)
         {
@@ -827,6 +856,11 @@ internal static partial class Native
     internal static class DropPreviewHelper
     {
         [ThreadStatic] static IDropTargetHelper? instance;
+        [ThreadStatic] static nint activeHwnd;
+        [ThreadStatic] static object? activeData;
+        internal static bool IsActive => activeHwnd != 0;
+        internal static int DragEnterCount { get; private set; }
+        internal static System.Windows.DragDropEffects LastEnterEffects { get; private set; }
         static IDropTargetHelper? Instance => instance ??= Create();
         static IDropTargetHelper? Create()
         {
@@ -838,29 +872,81 @@ internal static partial class Native
             if(hwnd==0||e.Data is not ComData com)return;
             try
             {
+                if(activeHwnd!=0&&(activeHwnd!=hwnd||!ReferenceEquals(activeData,e.Data)))
+                {
+                    try{Instance?.DragLeave();}catch{}
+                }
+                activeHwnd=hwnd;
+                activeData=e.Data;
+                DragEnterCount++;
+                LastEnterEffects=e.Effects;
                 GetCursorPos(out var pt);
                 var helper=Instance;
                 if(helper==null)return;
                 helper.DragEnter(hwnd,com,ref pt,(uint)e.Effects);
                 helper.Show(true);
+                EnsureHostBelowDragImage(hwnd);
             }
             catch{}
         }
-        internal static void DragOver(System.Windows.DragEventArgs e)
+        internal static void DragOver(nint hwnd,System.Windows.DragEventArgs e)
         {
-            try{GetCursorPos(out var pt);Instance?.DragOver(ref pt,(uint)e.Effects);}
+            if(hwnd!=0&&(activeHwnd!=hwnd||!ReferenceEquals(activeData,e.Data)))
+            {
+                DragEnter(hwnd,e);
+                return;
+            }
+            try
+            {
+                GetCursorPos(out var pt);
+                var helper=Instance;
+                if(helper==null)return;
+                helper.DragOver(ref pt,(uint)e.Effects);
+                helper.Show(true);
+                EnsureHostBelowDragImage(hwnd);
+            }
             catch{}
         }
         internal static void DragLeave()
         {
+            activeHwnd=0;
+            activeData=null;
             try{Instance?.DragLeave();}
             catch{}
         }
         internal static void Drop(System.Windows.DragEventArgs e)
         {
+            activeHwnd=0;
+            activeData=null;
             if(e.Data is not ComData com)return;
             try{GetCursorPos(out var pt);Instance?.Drop(com,ref pt,(uint)e.Effects);}
             catch{}
+        }
+        internal static void AttachWindow(GlassWindow window,Action? onLeave=null)
+        {
+            int epoch=0;
+            window.AddHandler(System.Windows.DragDrop.DragEnterEvent,new System.Windows.DragEventHandler((_,a)=>{epoch++;DragEnter(window.Handle,a);}),true);
+            window.AddHandler(System.Windows.DragDrop.DragOverEvent,new System.Windows.DragEventHandler((_,a)=>{epoch++;DragOver(window.Handle,a);}),true);
+            window.AddHandler(System.Windows.DragDrop.DragLeaveEvent,new System.Windows.DragEventHandler((_,_)=>
+            {
+                int leaveEpoch=epoch;
+                window.Dispatcher.BeginInvoke(System.Windows.Threading.DispatcherPriority.Input,new Action(()=>
+                {
+                    if(leaveEpoch!=epoch)return;
+                    bool buttonsHeld=((GetAsyncKeyState(1)|GetAsyncKeyState(2))&0x8000)!=0;
+                    if(buttonsHeld&&GetCursorPos(out var p)&&window.Contains(p))return;
+                    DragLeave();
+                    onLeave?.Invoke();
+                }));
+            }),true);
+            window.AddHandler(System.Windows.DragDrop.DropEvent,new System.Windows.DragEventHandler((_,a)=>{epoch++;Drop(a);}),true);
+        }
+        static void EnsureHostBelowDragImage(nint hwnd)
+        {
+            if(hwnd==0)return;
+            nint di=FindActiveSysDragImage();
+            if(di!=0&&di!=hwnd&&IsWindowAbove(hwnd,di))
+                DeferWindowPosAsync(hwnd,di,0,0,0,0,0x0003); // SWP_NOMOVE | SWP_NOSIZE
         }
     }
 }

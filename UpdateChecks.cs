@@ -64,6 +64,24 @@ internal static class UpdateChecks
             var revUpdates=new ReleaseUpdates("fixture/MacDock",key.ExportSubjectPublicKeyInfo(),revHttp){LocalBuildTimeUtc=revUpdatedAt.AddMinutes(-10)};
             var rev=await revUpdates.Check(new Version(1,9,1),CancellationToken.None);
             Check("same version newer revision detected",rev!=null&&rev.IsRevision&&rev.Version=="1.9.1");
+            var binDir=Path.Combine(output,"update-bin-"+Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(binDir);
+            var binFixture=Path.Combine(binDir,"MacDock.dll");
+            File.WriteAllBytes(binFixture,"old-binary-bytes"u8.ToArray());
+            var newBinBytes="new-binary-bytes"u8.ToArray();
+            var binSums=System.Text.Encoding.UTF8.GetBytes($"{Convert.ToHexString(SHA256.HashData(payload)).ToLowerInvariant()}  MacDock-1.9.1-win-x64-Setup.exe\n{Convert.ToHexString(SHA256.HashData(newBinBytes)).ToLowerInvariant()}  MacDock.dll\n");
+            using var fastRevHttp=new HttpClient(new Responses(uri=>
+            {
+                if(uri.IdnHost=="api.github.com")return Bytes(JsonSerializer.SerializeToUtf8Bytes(new{tag_name="v1.9.1",draft=false,prerelease=false,body="短间隔覆盖修订",assets=new[]{new{name="MacDock-1.9.1-win-x64-Setup.exe",size=(long)payload.Length,updated_at=revUpdatedAt.AddSeconds(5)},new{name="SHA256SUMS.txt",size=(long)binSums.Length,updated_at=revUpdatedAt.AddSeconds(5)}}}));
+                if(uri.AbsolutePath.EndsWith("SHA256SUMS.txt"))return Bytes(binSums);
+                return Bytes(payload);
+            }));
+            var fastRevUpdates=new ReleaseUpdates("fixture/MacDock",key.ExportSubjectPublicKeyInfo(),fastRevHttp){LocalBuildTimeUtc=revUpdatedAt,LocalBinaryPath=binFixture};
+            var fastRev=await fastRevUpdates.Check(new Version(1,9,1),CancellationToken.None);
+            Check("same version short-interval revision detected via binary hash",fastRev!=null&&fastRev.IsRevision&&fastRev.Version=="1.9.1");
+            File.WriteAllBytes(binFixture,newBinBytes);
+            var sameRev=await fastRevUpdates.Check(new Version(1,9,1),CancellationToken.None);
+            Check("same version matching binary hash is ignored even if timestamp newer",sameRev==null);
             prerelease=true;
             Check("prerelease ignored",await updates.Check(old,CancellationToken.None)==null);
             prerelease=false;tamperManifest=true;

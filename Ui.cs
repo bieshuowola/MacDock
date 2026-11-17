@@ -256,7 +256,13 @@ internal class GlassWindow : Window
             HwndSource.FromHwnd(Handle).AddHook((nint h,int m,nint w,nint l,ref bool handled)=>{if(m==0x20A)LastRawWheel=$"{Title}:{h}; fg={Native.GetForegroundWindow()}";return 0;});
             HwndSource.FromHwnd(Handle).AddHook((nint h,int m,nint w,nint l,ref bool handled)=>
             {
-                if(m is 0x02E0 or 0x007E){UpdateCachedDpi();return 0;}
+                if(m is 0x02E0 or 0x007E)
+                {
+                    UpdateCachedDpi();
+                    if(IsVisible&&this is not DrawerWindow { IsDeforming: true })
+                        Dispatcher.BeginInvoke(DispatcherPriority.Normal,()=>{if(IsVisible&&this is not DrawerWindow { IsDeforming: true })RefreshMaterial();});
+                    return 0;
+                }
                 if(m==0x0020&&(MenuTracking||ShellMenu.ActivePopup!=0)){Native.SetArrowCursor();handled=true;return 1;}
                 if(m==0x47&&!MenuTracking)
                 {
@@ -281,12 +287,18 @@ internal class GlassWindow : Window
             if(this is DrawerWindow or DockWindow or RestShadow&&Native.HostMaterial){HwndSource.FromHwnd(Handle).CompositionTarget.BackgroundColor=Colors.Transparent;int policy=1;Native.DwmSetWindowAttribute(Handle,2,ref policy,4);var margins=new Native.Margins{Left=-1,Top=-1,Right=-1,Bottom=-1};Native.DwmExtendFrameIntoClientArea(Handle,ref margins);}
         };
     }
+    internal nint HostGlassBackdropHandle => hostGlass?.BackdropHandle ?? 0;
+    internal nint HostGlassShadowHandle => hostGlass?.ShadowHandle ?? 0;
     internal void InvalidateDpiCache(){cachedDpiScale=0;UpdateCachedDpi();}
     void UpdateCachedDpi()
     {
         if(Handle==0)return;
         uint dpi=Native.GetDpiForWindow(Handle);
-        if(dpi>0)cachedDpiScale=dpi/96.0;
+        if(dpi>0)
+        {
+            cachedDpiScale=dpi/96.0;
+            hostGlass?.UpdateScale(cachedDpiScale);
+        }
     }
     public virtual void RefreshMaterial()
     {
@@ -325,7 +337,7 @@ internal class GlassWindow : Window
     }
     internal void SetContentSurface(Border surface){Surface=surface;Content=surface;}
     public virtual bool Contains(Native.Point p) => IsVisible && Native.GetWindowRect(Handle, out var r) && r.Contains(p);
-    public void Place(int x, int y) => Native.DeferWindowPosAsync(Handle, -1, x, y, 0, 0, 0x0001);
+    public void Place(int x, int y) => Native.DeferWindowPosAsync(Handle, Native.TopmostInsertAfter(Handle), x, y, 0, 0, 0x0001);
     public FrameworkElement? Surface { get; protected set; }
 }
 

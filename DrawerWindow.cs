@@ -305,7 +305,6 @@ internal sealed class DrawerWindow : GlassWindow
     readonly List<Entry> visibleOrder = new();
     bool renderedListView;
     double renderedUnit, renderedScale;
-    bool dropPreviewActive;
     Entry? anchor;
     bool updating;
 
@@ -627,11 +626,8 @@ internal sealed class DrawerWindow : GlassWindow
             return 0;
         });
         Deactivated += (_, _) => Dispatcher.BeginInvoke(()=>c.DrawerFocusChanged());
-        DpiChanged += (_, _) => { InvalidateDpiCache(); InvalidatePrebakedSurface(); ApplyLayout(); Render(); };
-        AddHandler(DragDrop.DragEnterEvent, new DragEventHandler((_, a) => { if (!dropPreviewActive) { dropPreviewActive = true; Native.DropPreviewHelper.DragEnter(Handle, a); } else Native.DropPreviewHelper.DragOver(a); }), true);
-        AddHandler(DragDrop.DragOverEvent, new DragEventHandler((_, a) => { if (!dropPreviewActive) { dropPreviewActive = true; Native.DropPreviewHelper.DragEnter(Handle, a); } else Native.DropPreviewHelper.DragOver(a); }), true);
-        AddHandler(DragDrop.DragLeaveEvent, new DragEventHandler((_, _) => { if (dropPreviewActive && (!Native.GetCursorPos(out var p) || !Contains(p))) { dropPreviewActive = false; Native.DropPreviewHelper.DragLeave(); } }), true);
-        AddHandler(DragDrop.DropEvent, new DragEventHandler((_, a) => { dropPreviewActive = false; Native.DropPreviewHelper.Drop(a); }), true);
+        DpiChanged += (_, _) => { InvalidateDpiCache(); InvalidatePrebakedSurface(); ApplyLayout(); Render(); if (IsVisible && !IsDeforming) RefreshMaterial(); };
+        Native.DropPreviewHelper.AttachWindow(this, () => EndDesktopDrop());
         scroll.ScrollChanged += (_, e) => { if (Math.Abs(e.VerticalChange) > 0.1) InvalidatePrebakedSurface(); };
         void OnThemeChanged() => InvalidatePrebakedSurface();
         Theme.Changed += OnThemeChanged;

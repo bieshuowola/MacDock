@@ -61,14 +61,10 @@ internal sealed class DockWindow : GlassWindow
         Surface = new Border{Child=layers,Background=Brushes.Transparent};
         Content = Surface;
         Height = c.Layout.DockHeight;
-        DragOver += BlankOver; Drop += BlankDrop;
-        bool dropPreviewActive=false;
-        AddHandler(DragDrop.DragEnterEvent,new DragEventHandler((_,a)=>{if(!dropPreviewActive){dropPreviewActive=true;Native.DropPreviewHelper.DragEnter(Handle,a);}else Native.DropPreviewHelper.DragOver(a);}),true);
-        AddHandler(DragDrop.DragOverEvent,new DragEventHandler((_,a)=>{if(!dropPreviewActive){dropPreviewActive=true;Native.DropPreviewHelper.DragEnter(Handle,a);}else Native.DropPreviewHelper.DragOver(a);}),true);
-        AddHandler(DragDrop.DragLeaveEvent,new DragEventHandler((_,_)=>{if(dropPreviewActive&&(!Native.GetCursorPos(out var p)||!Contains(p))){dropPreviewActive=false;Native.DropPreviewHelper.DragLeave();}}),true);
-        AddHandler(DragDrop.DropEvent,new DragEventHandler((_,a)=>{dropPreviewActive=false;Native.DropPreviewHelper.Drop(a);}),true);
+        DragEnter += BlankOver; DragOver += BlankOver; Drop += BlankDrop;
+        Native.DropPreviewHelper.AttachWindow(this, () => { mouseInhibited = false; if (owner.Drawer?.IsVisible != true) owner.SetExternalFileDrag(false); });
         PreviewDragEnter+=(_,a)=> { if(a.Data.GetDataPresent(DataFormats.FileDrop)&&!a.Data.GetDataPresent("MacDock.Entry"))owner.SetExternalFileDrag(true); if(!mouseInhibited){mouseInhibited=true;ResetMagnification();} };
-        PreviewDragLeave+=(_,_)=> {Native.GetCursorPos(out var p);if(!Contains(p)&&!owner.InternalDragging)mouseInhibited=false;if((Native.GetAsyncKeyState(1)&0x8000)==0&&owner.Drawer?.IsVisible!=true)owner.SetExternalFileDrag(false);};
+        PreviewDragLeave+=(_,_)=> {Native.GetCursorPos(out var p);if(!Contains(p)&&!owner.InternalDragging)mouseInhibited=false;if(((Native.GetAsyncKeyState(1)|Native.GetAsyncKeyState(2))&0x8000)==0&&owner.Drawer?.IsVisible!=true)owner.SetExternalFileDrag(false);};
         PreviewDrop+=(_,_)=>{mouseInhibited=false;owner.SetExternalFileDrag(false);};
         ContextMenu = c.GeneralMenu();
         TrackDockMenu(ContextMenu);
@@ -81,6 +77,7 @@ internal sealed class DockWindow : GlassWindow
         PreviewKeyDown+=OnDockKey;
         Deactivated+=(_,_)=>{if(KeyboardActive){EndKeyboard();owner.DockKeyboardEnded();}};
         SizeChanged+=(_,_)=>SetReveal(reveal);
+        DpiChanged+=(_,_)=>{if(!IsLoaded)return;InvalidateDpiCache();RefreshMaterial();owner.Position();};
         PreviewMouseDown+=(_,_)=>{CancelTip(true);owner.SettleDockMotion();};
         PreviewMouseRightButtonDown+=(_,_)=>Native.SuppressAppStartingCursor();
         PreviewMouseRightButtonUp+=(_,_)=>Native.RestoreSystemCursors();
@@ -436,14 +433,14 @@ internal sealed class DockWindow : GlassWindow
 
         // Reordering and file drops. Dragging also carries the real file list so the icon can be
         // dragged out to Explorer or another application.
-        Point start = default; bool dragged = false, pressedHere = false;
+        Point start = default; Native.Point startScreen = default; bool dragged = false, pressedHere = false;
         PointerSort.Attach(root,this,()=>true,()=>layout.Where(n=>n.Entry!=null).Select(n=>n.Element).ToArray(),null,(ids,id,index)=>owner.CommitSort(ids,id,index,true),active=>{if(active)ClearDoubleClickState();owner.InternalDragging=active;mouseInhibited=active;ResetMagnification();if(!active)owner.FinishDrag();},()=>ActivateTile(e,root,false),external:()=>{ClearDoubleClickState();owner.InternalDragging=true;try{var data=ShellOps.DragData(e.Id,owner.DragPaths(e),false,"dock",e.IsAlias);System.Windows.DragDrop.DoDragDrop(root,data,DragDropEffects.Copy|DragDropEffects.Link|(e.IsAlias?DragDropEffects.None:DragDropEffects.Move));}finally{owner.InternalDragging=false;mouseInhibited=false;owner.FinishDrag();}},reduced:()=>owner.Store.Data.ReducedMotion);
-        root.PreviewMouseLeftButtonDown += (_, a) => { start = a.GetPosition(root); dragged = false; pressedHere = true;root.CaptureMouse(); };
+        root.PreviewMouseLeftButtonDown += (_, a) => { start = a.GetPosition(root); Native.GetCursorPos(out startScreen); dragged = false; pressedHere = true; root.CaptureMouse(); };
         root.PreviewMouseMove += (_, a) =>
         {
             if (a.LeftButton != MouseButtonState.Pressed || dragged || !pressedHere) return;
-            if ((a.GetPosition(root) - start).Length < 8) return;
-            dragged = true;ClearDoubleClickState();root.ReleaseMouseCapture(); owner.InternalDragging = true;
+            if (!MovedPastThreshold(start, startScreen, a.GetPosition(root), owner.Scale)) return;
+            dragged = true; pressedHere = false; ClearDoubleClickState(); root.ReleaseMouseCapture(); owner.InternalDragging = true;
             mouseInhibited = true; ResetMagnification();
             try
             {
@@ -452,7 +449,8 @@ internal sealed class DockWindow : GlassWindow
             }
             finally { owner.InternalDragging = false; mouseInhibited = false; owner.FinishDrag(); }
         };
-        root.MouseLeftButtonUp += (_, a) => { bool invoke=pressedHere&&!dragged&&root.IsMouseOver;pressedHere=false;root.ReleaseMouseCapture();if(invoke)ActivateTile(e,root,false);a.Handled=true; };
+        root.LostMouseCapture += (_, _) => { pressedHere = false; };
+        root.MouseLeftButtonUp += (_, a) => { bool moved = dragged || MovedPastThreshold(start, startScreen, a.GetPosition(root), owner.Scale); bool invoke = pressedHere && !moved && !owner.InternalDragging && PointerSort.Active == null && root.IsMouseOver; pressedHere = false; if (root.IsMouseCaptured) root.ReleaseMouseCapture(); if (invoke) ActivateTile(e, root, false); a.Handled = true; };
 
         var menu = new ContextMenu();
         EntryMenu.Fill(menu, owner, new[] { e });
@@ -901,6 +899,19 @@ internal sealed class DockWindow : GlassWindow
         return origin=="drawer"&&owner.Store.Data.Mode=="自定义"&&(a.KeyStates&(DragDropKeyStates.ControlKey|DragDropKeyStates.ShiftKey))==0;
     }
 
+    static bool MovedPastThreshold(Point startLocal, Native.Point startScreen, Point currentLocal, double scale)
+    {
+        double threshold = Math.Max(5, SystemParameters.MinimumHorizontalDragDistance);
+        if ((currentLocal - startLocal).Length >= threshold) return true;
+        if (Native.GetCursorPos(out var cur))
+        {
+            double s = Math.Max(1, scale);
+            double dx = cur.X - startScreen.X, dy = cur.Y - startScreen.Y;
+            if (dx * dx + dy * dy >= (threshold * s) * (threshold * s)) return true;
+        }
+        return false;
+    }
+
     // ---------------------------------------------------------------- drawer tiles
     public FrameworkElement Tile(Entry e, bool inDrawer)
     {
@@ -953,11 +964,11 @@ internal sealed class DockWindow : GlassWindow
         root.MouseEnter += (_, _) => { if (inDrawer) owner.Drawer?.PaintTile(root); AnimateIcon(iconHost, inDrawer ? 1.05 : 1); };
         root.MouseLeave += (_, _) => { if(inDrawer)owner.Drawer?.PaintTile(root);AnimateIcon(iconHost, 1); };
 
-        Point start = default; bool dragged = false, pressedHere = false, selectionHandled = false;
+        Point start = default; Native.Point startScreen = default; bool dragged = false, pressedHere = false, selectionHandled = false;
         if(inDrawer)PointerSort.Attach(root,owner.Drawer,()=>true,()=>owner.Drawer!.SortTiles(e.Source=="manual"),()=>owner.Drawer?.Scroller,(ids,id,index)=>owner.CommitSort(ids,id,index,false),active=>{if(active)ClearDoubleClickState();owner.InternalDragging=active;},()=>{if(Native.IsControlDown()||Native.IsShiftDown()){var ctrl=Native.IsControlDown();var shift=Native.IsShiftDown();ClearDoubleClickState();owner.Drawer?.FocusGrid();owner.Drawer?.ClickSelect(e,ctrl,shift);return;}ActivateTile(e,root,true);},()=>{owner.Drawer!.FocusGrid();if(owner.Drawer.IsSelected(e)!=true)owner.Drawer.ClickSelect(e,false,false);},external:()=>{ClearDoubleClickState();owner.InternalDragging=true;try{var data=ShellOps.DragData(e.Id,owner.DragPaths(e),false,"drawer",e.IsAlias);System.Windows.DragDrop.DoDragDrop(root,data,DragDropEffects.Copy|DragDropEffects.Link|(e.IsAlias?DragDropEffects.None:DragDropEffects.Move));}finally{owner.InternalDragging=false;owner.FinishDrag();}},reduced:()=>owner.Store.Data.ReducedMotion,prepare:()=>owner.SettleDrawerMotion(),owner:owner,sortAllowed:()=>owner.Store.Data.Mode=="自定义");
         root.PreviewMouseLeftButtonDown += (_, a) =>
         {
-            start = a.GetPosition(root); dragged = false; pressedHere = true; selectionHandled = false;
+            start = a.GetPosition(root); Native.GetCursorPos(out startScreen); dragged = false; pressedHere = true; selectionHandled = false;
             if (!inDrawer) return;
             bool ctrl = Native.IsControlDown();
             bool shift = Native.IsShiftDown();
@@ -976,9 +987,9 @@ internal sealed class DockWindow : GlassWindow
         root.PreviewMouseMove += (_, a) =>
         {
             if (a.LeftButton != MouseButtonState.Pressed || dragged || !pressedHere) return;
-            if ((a.GetPosition(root) - start).Length < 8) return;
+            if (!MovedPastThreshold(start, startScreen, a.GetPosition(root), owner.Scale)) return;
 
-            dragged = true; ClearDoubleClickState(); owner.InternalDragging = true;
+            dragged = true; pressedHere = false; ClearDoubleClickState(); owner.InternalDragging = true;
             if (!inDrawer) { pointerInside = false; EnsureWave(); }
             try
             {
@@ -988,9 +999,11 @@ internal sealed class DockWindow : GlassWindow
             }
             finally { owner.InternalDragging = false; }
         };
+        root.LostMouseCapture += (_, _) => { pressedHere = false; };
         root.MouseLeftButtonUp += (_, a) =>
         {
-            bool shouldOpen = pressedHere && !dragged && !selectionHandled && root.IsMouseOver && !Native.IsControlDown() && !Native.IsShiftDown();
+            bool moved = dragged || MovedPastThreshold(start, startScreen, a.GetPosition(root), owner.Scale);
+            bool shouldOpen = pressedHere && !moved && !selectionHandled && !owner.InternalDragging && PointerSort.Active == null && root.IsMouseOver && !Native.IsControlDown() && !Native.IsShiftDown();
             pressedHere = false;
             selectionHandled = false;
             if (shouldOpen) ActivateTile(e, root, inDrawer);

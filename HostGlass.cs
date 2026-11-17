@@ -44,6 +44,14 @@ internal sealed class HostGlass:IDisposable
     GeniePose? genie;
     bool poseDirty=true;
     RestShadow? restShadow;double dpiScale=1;
+    internal nint BackdropHandle => window;
+    internal nint ShadowHandle => restShadow?.Handle ?? 0;
+    internal void UpdateScale(double scale)
+    {
+        if(scale<=0||Math.Abs(dpiScale-scale)<=0.0001)return;
+        dpiScale=scale;poseDirty=true;
+        if(showing)RefreshShadow();
+    }
     [DllImport("gdi32.dll")]static extern nint CreateRoundRectRgn(int left,int top,int right,int bottom,int width,int height);
     [DllImport("gdi32.dll")]static extern nint CreatePolygonRgn([In]Native.Point[] points,int count,int fill);
     [DllImport("gdi32.dll")]static extern bool DeleteObject(nint obj);
@@ -93,6 +101,7 @@ internal sealed class HostGlass:IDisposable
     void ApplyReveal(){if(genie!=null)return;var (r,c)=DockMotion.Shape(widthPixels,heightPixels,radiusPixels,reveal);geometry.Offset=new Vector2((float)r.X,(float)r.Y);geometry.Size=new Vector2((float)r.Width,(float)r.Height);geometry.CornerRadius=new Vector2((float)c);}
     internal void Deform(GeniePose? pose,double scale)
     {
+        if(scale>0&&Math.Abs(dpiScale-scale)>0.0001){dpiScale=scale;poseDirty=true;}
         if(!poseDirty&&Equals(genie,pose))return;
         bool dirty=poseDirty;
         poseDirty=false;

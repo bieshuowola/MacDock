@@ -737,12 +737,14 @@ internal sealed class Controller : IDisposable
             Drawer?.InvalidateDpiCache();
             bool geometryChanged=dpiChanged||lastDisplayLayout==null||Math.Abs(lastDisplayLayout.Unit-layout.Unit)>.001;
             if(geometryChanged||lastDisplayLayout!.VisibleDockCount(Store.PinnedEntries().Count)!=layout.VisibleDockCount(Store.PinnedEntries().Count))Dock.Rebuild();
+            if(Dock.IsVisible)Dock.RefreshMaterial();
             if(Drawer is {} drawer)
             {
                 if(drawerClosing){drawerMotion.Cancel();CompleteDrawerMotion(false);}
                 drawer.InvalidatePrebakedSurface();
                 drawer.ApplyLayout();
                 if(geometryChanged||lastDisplayLayout!.DrawerWidth!=layout.DrawerWidth)drawer.ApplyCustomOrder();
+                if(drawer.IsVisible&&!drawer.IsDeforming)drawer.RefreshMaterial();
             }
             lastDisplayLayout=layout;
         }
@@ -775,7 +777,7 @@ internal sealed class Controller : IDisposable
             Top=area.Bottom-(int)Math.Round((Layout.DockHeight+Layout.DockBottomGap)*Scale),
             Bottom=area.Bottom-(int)Math.Round(Layout.DockBottomGap*Scale)
         };
-        if(Dock.IsVisible && dockToken==0) { dockY=dockRect.Top;Native.DeferWindowPosAsync(Dock.Handle,-1,dockRect.Left,dockRect.Top,0,0,0x0001); }
+        if(Dock.IsVisible && dockToken==0) { dockY=dockRect.Top;Native.DeferWindowPosAsync(Dock.Handle,Native.TopmostInsertAfter(Dock.Handle),dockRect.Left,dockRect.Top,0,0,0x0001); }
         else if(!Dock.IsVisible) dockY=dockRect.Top;
     }
     internal void PositionDockPreview(){PlaceDock(WorkArea);UpdateModalRegions();}
@@ -790,7 +792,7 @@ internal sealed class Controller : IDisposable
     void MoveDock(int y)
     {
         dockY=y;
-        Native.DeferWindowPosAsync(Dock.Handle,-1,dockRect.Left,y,0,0,0x0001);
+        Native.DeferWindowPosAsync(Dock.Handle,Native.TopmostInsertAfter(Dock.Handle),dockRect.Left,y,0,0,0x0001);
     }
     internal void UpdateModalRegions()
     {

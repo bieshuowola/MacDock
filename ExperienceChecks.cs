@@ -502,6 +502,7 @@ internal static class ExperienceChecks
             // 1. External OLE drag from otherWindow onto Dock general area (Gateway button / Dock edge) -> drops into desktop
             var srcCenter=otherWindow.PointToScreen(new Point(otherWindow.ActualWidth/2,otherWindow.ActualHeight/2));
             var dockTarget=c.Dock.GatewayCenter;
+            bool helperActiveDuringDrag=false, dragImgNotOccluded=true;
             await Task.Run(()=>
             {
                 Native.MovePointer((int)srcCenter.X,(int)srcCenter.Y);
@@ -517,6 +518,12 @@ internal static class ExperienceChecks
                     Thread.Sleep(25);
                 }
                 Thread.Sleep(180);
+                Application.Current.Dispatcher.Invoke(()=>
+                {
+                    helperActiveDuringDrag=Native.DropPreviewHelper.IsActive;
+                    nint di=Native.FindActiveSysDragImage();
+                    if(di!=0&&Native.IsWindowAbove(c.Dock.Handle,di))dragImgNotOccluded=false;
+                });
                 Native.TestButton(false);
                 Thread.Sleep(400);
             });
@@ -524,9 +531,10 @@ internal static class ExperienceChecks
             var landedPath=Path.Combine(testDesktop,"external-drop-item.txt");
             for(int w=0;w<25&&(!File.Exists(landedPath)||!c.Store.Data.Entries.Any(x=>string.Equals(x.Path,landedPath,StringComparison.OrdinalIgnoreCase)));w++)await Task.Delay(80);
             var hitHwnd=Native.WindowFromPoint(dockTarget);
+            bool dropPreviewCleanedUp=!Native.DropPreviewHelper.IsActive&&!c.ExternalFileDragActive;
             bool droppedToDesktop=dragStarted&&File.Exists(landedPath)&&!File.Exists(srcFile)&&c.Store.Data.Entries.Any(x=>string.Equals(x.Path,landedPath,StringComparison.OrdinalIgnoreCase));
-            if(!droppedToDesktop)
-                throw new InvalidOperationException($"External Dock drop failed: dragStarted={dragStarted}, effect={dragEffect}, dock={c.Dock.Handle}, hit={(long)hitHwnd}, dockPt=({dockTarget.X},{dockTarget.Y}), dockVis={c.Dock.IsVisible}, landed={File.Exists(landedPath)}, srcGone={!File.Exists(srcFile)}");
+            if(!droppedToDesktop||!helperActiveDuringDrag||Native.DropPreviewHelper.DragEnterCount<=0||Native.DropPreviewHelper.LastEnterEffects==DragDropEffects.None||!dragImgNotOccluded||!dropPreviewCleanedUp)
+                throw new InvalidOperationException($"External Dock drop/preview failed: dropped={droppedToDesktop}, helperActive={helperActiveDuringDrag}, enterCount={Native.DropPreviewHelper.DragEnterCount}, effects={Native.DropPreviewHelper.LastEnterEffects}, notOccluded={dragImgNotOccluded}, cleanedUp={dropPreviewCleanedUp}, dragStarted={dragStarted}, effect={dragEffect}, dock={c.Dock.Handle}, hit={(long)hitHwnd}");
 
             // Self-drop loop prevention: dropping file already in testDesktop without copy must be silently ignored
             bool selfLoopIgnored=!c.DropFilesToDesktop(new[]{landedPath},copy:false)&&File.Exists(landedPath);
@@ -543,6 +551,93 @@ internal static class ExperienceChecks
             c.SettleDrawerMotion();
             await Task.Delay(250);
             var drawer=c.Drawer!;
+
+            // Verify dragging beyond threshold and releasing in invalid zone NEVER triggers Launch,
+            // and dragging onto Dock PreviewPin keeps ghost Z-order strictly above Dock & HostGlass and pins cleanly.
+            var landedEntry=c.Store.Data.Entries.First(x=>string.Equals(x.Path,landedPath,StringComparison.OrdinalIgnoreCase));
+            int launchesBeforeDrag=c.LaunchCount;
+            string savedMode=c.Store.Data.Mode;
+            c.Store.Data.Mode="名称";
+            drawer.Render();
+            await Task.Delay(120);
+            var invalidStart=drawer.TileCenter(landedEntry.Id);
+            await Task.Run(()=>
+            {
+                Native.MovePointer(invalidStart.X,invalidStart.Y);
+                Thread.Sleep(60);
+                Native.TestButton(true);
+                Thread.Sleep(40);
+                for(int step=1;step<=8;step++)
+                {
+                    Native.MovePointer(invalidStart.X+step*4,invalidStart.Y+step);
+                    Thread.Sleep(15);
+                }
+                Thread.Sleep(60);
+                Native.TestButton(false);
+                Thread.Sleep(150);
+                // Coalesced rapid drag-release over threshold
+                Native.MovePointer(invalidStart.X,invalidStart.Y);
+                Thread.Sleep(50);
+                Native.TestButton(true);
+                Thread.Sleep(20);
+                Native.MovePointer(invalidStart.X+28,invalidStart.Y+10);
+                Thread.Sleep(10);
+                Native.TestButton(false);
+                Thread.Sleep(150);
+            });
+            c.Store.Data.Mode=savedMode;
+            drawer.Render();
+            await Task.Delay(120);
+            bool noLaunchOnInvalidDrag=c.LaunchCount==launchesBeforeDrag&&PointerSort.Active==null&&!c.InternalDragging;
+            if(!noLaunchOnInvalidDrag)
+                throw new InvalidOperationException($"Invalid-zone drag triggered Launch or leaked state: launchDelta={c.LaunchCount-launchesBeforeDrag}, active={PointerSort.Active!=null}, internalDragging={c.InternalDragging}");
+
+            var firstPinned=c.Store.PinnedEntries().First();
+            var dockPinPt=c.Dock.TileCenter(firstPinned.Id);
+            var pinStart=drawer.TileCenter(landedEntry.Id);
+            int previewPinZSamples=0;
+            bool ghostAlwaysTopmostInPreviewPin=true;
+            string zFailDetail="";
+            await Task.Run(()=>
+            {
+                Native.MovePointer(pinStart.X,pinStart.Y);
+                Thread.Sleep(60);
+                Native.TestButton(true);
+                Thread.Sleep(50);
+                for(int step=1;step<=14;step++)
+                {
+                    double t=step/14.0;
+                    Native.MovePointer((int)Math.Round(pinStart.X+(dockPinPt.X-pinStart.X)*t),(int)Math.Round(pinStart.Y+(dockPinPt.Y-pinStart.Y)*t));
+                    Thread.Sleep(25);
+                }
+                for(int sample=0;sample<6;sample++)
+                {
+                    Native.MovePointer(dockPinPt.X+(sample%2==0?2:-2),dockPinPt.Y);
+                    Thread.Sleep(35);
+                    Application.Current.Dispatcher.Invoke(()=>
+                    {
+                        if(c.Dock.PreviewingPin&&PointerSort.Active is { GhostHandle: not 0 } active)
+                        {
+                            previewPinZSamples++;
+                            nint gh=active.GhostHandle;
+                            bool aboveDock=Native.IsWindowAbove(gh,c.Dock.Handle);
+                            nint bg=c.Dock.HostGlassBackdropHandle;
+                            bool aboveGlass=bg==0||Native.IsWindowAbove(gh,bg);
+                            bool aboveDrawer=Native.IsWindowAbove(gh,drawer.Handle);
+                            if(!aboveDock||!aboveGlass||!aboveDrawer)
+                            {
+                                ghostAlwaysTopmostInPreviewPin=false;
+                                zFailDetail=$"sample={sample}, aboveDock={aboveDock}, aboveGlass={aboveGlass}, aboveDrawer={aboveDrawer}";
+                            }
+                        }
+                    });
+                }
+                Native.TestButton(false);
+                Thread.Sleep(280);
+            });
+            bool pinnedViaDrop=c.Store.PinnedEntries().Any(x=>x.Id==landedEntry.Id)&&c.LaunchCount==launchesBeforeDrag&&!c.Dock.PreviewingPin&&PointerSort.Active==null;
+            if(previewPinZSamples<4||!ghostAlwaysTopmostInPreviewPin||!pinnedViaDrop)
+                throw new InvalidOperationException($"PreviewPin Z-order or pin failed: samples={previewPinZSamples}, alwaysAbove={ghostAlwaysTopmostInPreviewPin} ({zFailDetail}), pinnedViaDrop={pinnedViaDrop}, launchDelta={c.LaunchCount-launchesBeforeDrag}");
 
             int footerCount=drawer.FooterActions.Children.Count;
             if(footerCount!=2)
@@ -617,7 +712,7 @@ internal static class ExperienceChecks
                 throw new InvalidOperationException("Drawer failed to close on focus loss after unlocking pin");
 
             pass=true;
-            detail=$"droppedToDesktop={droppedToDesktop}, selfLoopIgnored={selfLoopIgnored}, marqueeSelected={marqueeSelected}, footerCount={footerCount}, pinnedOn={pinnedOn}, stayedOpenWhilePinned={stayedOpenWhilePinned}, closeResetsPin={closeResetsPin}, unlockedOk={unlockedOk}, closedAfterUnlock={closedAfterUnlock}";
+            detail=$"droppedToDesktop={droppedToDesktop}, helperActive={helperActiveDuringDrag}, noLaunchOnInvalidDrag={noLaunchOnInvalidDrag}, previewPinZSamples={previewPinZSamples}, pinnedViaDrop={pinnedViaDrop}, selfLoopIgnored={selfLoopIgnored}, marqueeSelected={marqueeSelected}, footerCount={footerCount}, pinnedOn={pinnedOn}, stayedOpenWhilePinned={stayedOpenWhilePinned}, closeResetsPin={closeResetsPin}, unlockedOk={unlockedOk}, closedAfterUnlock={closedAfterUnlock}";
         }
         catch(Exception ex)
         {
@@ -867,7 +962,7 @@ internal static class ExperienceChecks
             c.ToggleDrawer();
             for(int w=0;w<60&&(c.Drawer?.IsVisible!=true||c.DrawerMotionRunning||c.DrawerProgress<0.99);w++)await Task.Delay(25);
             c.SettleDrawerMotion();
-            c.Drawer.UpdateLayout();
+            c.Drawer!.UpdateLayout();
             var dSym=c.Drawer;
             int measuredCols=dSym.MeasuredColumns();
             var rowTiles=dSym.SortTiles(false).Take(measuredCols).ToArray();
