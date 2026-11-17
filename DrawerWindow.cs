@@ -133,7 +133,7 @@ internal sealed class DrawerWindow : GlassWindow
         // Coverage stays with the material's four corner patches, also in the
         // cached live texture. A second geometry clip would quantize it again.
         var bounds=new Rect(0,0,PanelWidth,PanelHeight);
-        ConfigureSurfaceGeometry(1, clipToStage: !shareShadow);
+        if(!deforming)ConfigureSurfaceGeometry(1, clipToStage: !shareShadow);
         deforming=true;CurrentPose=pose;SetMaterialGenie(pose.Progress>=1?null:pose);
         owner.DrawerLayerFrame?.Invoke("begin-after-resize",MaterialSnapshot);
         if(!meshAttached&&Surface!=null)

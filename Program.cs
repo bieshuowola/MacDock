@@ -43,8 +43,6 @@ internal static class Program
             return fixtureApp.Run(w);
         }
         bool isTestRun=args.Any(a=>a.StartsWith("--",StringComparison.Ordinal)&&(a.EndsWith("-test",StringComparison.Ordinal)||a is "--product-preview" or "--genie-idle-check" or "--external-glass" or "--native-menu" or "--contrast" or "--probe" or "--idle"));
-        void BootTrace(string msg){if(isTestRun)try{var d=Environment.GetEnvironmentVariable("MACDOCK_TEST_RESULTS")??AppContext.BaseDirectory;Directory.CreateDirectory(d);File.AppendAllText(Path.Combine(d,"boot-trace.log"),$"{DateTime.Now:HH:mm:ss.fff} [{Environment.ProcessId}] {msg}\r\n");}catch{}}
-        BootTrace("main-enter");
         using Mutex? mutex=isTestRun?null:new Mutex(true,"Local\\MacDock.Desktop.v1",out var first);
         if(!isTestRun && mutex!=null)
         {
@@ -67,11 +65,10 @@ internal static class Program
         }));
         Controller? c=null;
         AppDomain.CurrentDomain.ProcessExit+=(_,_)=>Native.RestoreSystemCursors(force:true);
-        app.DispatcherUnhandledException+=(_,e)=> { Native.RestoreSystemCursors(force:true);Log(e.Exception);BootTrace("dispatcher-ex: "+e.Exception);if(isTestRun){Environment.Exit(1);return;}System.Windows.MessageBox.Show("操作未完成，错误已记录。\n"+e.Exception.Message,"MacDock");e.Handled=true; };
+        app.DispatcherUnhandledException+=(_,e)=> { Native.RestoreSystemCursors(force:true);Log(e.Exception);if(isTestRun){Environment.Exit(1);return;}System.Windows.MessageBox.Show("操作未完成，错误已记录。\n"+e.Exception.Message,"MacDock");e.Handled=true; };
         AppDomain.CurrentDomain.UnhandledException+=(_,e)=>{ Native.RestoreSystemCursors(force:true);Log(e.ExceptionObject as Exception ?? new Exception(e.ExceptionObject.ToString())); };
         app.Startup+=(_,_)=>
         {
-            BootTrace("startup-enter");
             try
             {
                 bool testing=args.Any(a=>a is "--proportion-test" or "--hover-drag-test" or "--display-check-test" or "--window-click-test" or "--gesture-test" or "--gateway-test" or "--interaction-test" or "--motion-perf-test" or "--contour-test" or "--render-input-test" or "--cross-pin-test" or "--stability-test" or "--corner-test" or "--wake-strip-test" or "--shadow-test" or "--brand-test" or "--game-wake-test" or "--genie-test" or "--dock-motion-test" or "--native17-test" or "--sorting-test" or "--menu-focus-test" or "--mirror-test" or "--external-glass" or "--resume-test" or "--gpu-host" or "--transition-test" or "--appearance-test" or "--ui-test" or "--visual-test" or "--file-test" or "--contrast" or "--native-menu" or "--quality-test" or "--material-test" or "--probe" or "--idle" or "--settings-shot" or "--automation-host" or "--responsive-test" or "--drag-test");
@@ -81,14 +78,16 @@ internal static class Program
                 bool externalDropPin = false;
                 bool drawerStability = false;
                 bool drawerPasteReuse = false;
+                bool dockStability = false;
 #if MACDOCK_EXPERIENCE_CHECKS
                 productPreview = args.Contains("--product-preview");
                 dragE2E = args.Contains("--drag-e2e-test");
                 externalDropPin = args.Contains("--external-drop-pin-test");
                 drawerStability = args.Contains("--drawer-stability-test");
+                dockStability = args.Contains("--dock-stability-test");
                 testing|=args.Contains("--genie-idle-check");
                 drawerPasteReuse = args.Contains("--drawer-paste-reuse-test");
-                testing|=args.Contains("--experience-test")||productPreview||dragE2E||externalDropPin||drawerStability||drawerPasteReuse||args.Contains("--update-ui-test");
+                testing|=args.Contains("--experience-test")||productPreview||dragE2E||externalDropPin||drawerStability||dockStability||drawerPasteReuse||args.Contains("--update-ui-test");
 #endif
 #if MACDOCK_EXPERIENCE_CHECKS
                 if(testing&&Environment.GetEnvironmentVariable("MACDOCK_QA_SOFTWARE_RENDER")=="1")
@@ -99,8 +98,7 @@ internal static class Program
                 {
                     try{File.Delete(Path.Combine(testProfile,"last-session.json"));}catch{}
                 }
-                c=new Controller(testProfile,autoHide:testing,skipDesktop:productPreview||dragE2E||externalDropPin||drawerStability||drawerPasteReuse);
-                BootTrace("controller-created");
+                c=new Controller(testProfile,autoHide:testing,skipDesktop:productPreview||dragE2E||externalDropPin||drawerStability||dockStability||drawerPasteReuse);
                 c.RecordSession(args,testing);
                 if(args.Contains("--first-run-test"))app.Dispatcher.BeginInvoke(DispatcherPriority.Normal,()=>{_=FirstRunChecks.Run(c);});
                 if(args.Contains("--settings-release-test"))app.Dispatcher.BeginInvoke(DispatcherPriority.Normal,()=>{_=SettingsReleaseChecks.Run(c);});
@@ -111,6 +109,7 @@ internal static class Program
                 if(args.Contains("--drag-e2e-test"))app.Dispatcher.BeginInvoke(DispatcherPriority.Normal,()=>{_=ExperienceChecks.DragE2E(c);});
                 if(args.Contains("--external-drop-pin-test"))app.Dispatcher.BeginInvoke(DispatcherPriority.Normal,()=>{_=ExperienceChecks.ExternalDropAndPin(c);});
                 if(args.Contains("--drawer-stability-test"))app.Dispatcher.BeginInvoke(DispatcherPriority.Normal,()=>{_=ExperienceChecks.DrawerStability(c);});
+                if(args.Contains("--dock-stability-test"))app.Dispatcher.BeginInvoke(DispatcherPriority.Normal,()=>{_=ExperienceChecks.DockStability(c);});
                 if(args.Contains("--drawer-paste-reuse-test"))app.Dispatcher.BeginInvoke(DispatcherPriority.Normal,()=>{_=ExperienceChecks.DrawerPasteReuse(c);});
                 if(args.Contains("--update-ui-test"))app.Dispatcher.BeginInvoke(DispatcherPriority.Normal,()=>{_=ExperienceChecks.Update(c);});
 #endif
@@ -157,7 +156,7 @@ internal static class Program
                 if(args.Contains("--drawer")) c.ToggleDrawer();
                 if(args.Contains("--dock")) c.Expand();
             }
-            catch(Exception e) { Log(e);BootTrace("startup-ex: "+e);if(isTestRun){Environment.Exit(1);return;}System.Windows.MessageBox.Show("MacDock 无法启动："+e.Message,"MacDock");app.Shutdown(1); }
+            catch(Exception e) { Log(e);if(isTestRun){Environment.Exit(1);return;}System.Windows.MessageBox.Show("MacDock 无法启动："+e.Message,"MacDock");app.Shutdown(1); }
         };
         app.Exit+=(_,_)=>c?.Dispose();
         var result=app.Run();HostGlass.ShutdownQueue();DiagnosticsLog.Finish();return result;

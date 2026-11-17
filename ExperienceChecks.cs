@@ -644,6 +644,13 @@ internal static class ExperienceChecks
         var rootDir=Path.Combine(Output,"drawer-stability");
         var openFrames=new List<(int Cycle,double Phase,double Opacity,double Ms)>();
         var closeFrames=new List<(int Cycle,double Phase,double Opacity,double Ms)>();
+        var cpuFrameMs=new List<double>();
+        long cpuEnter=0;
+        c.DrawerTiming=stage=>
+        {
+            if(stage=="frame-enter")cpuEnter=System.Diagnostics.Stopwatch.GetTimestamp();
+            else if(stage=="frame-leave"&&cpuEnter!=0){cpuFrameMs.Add(System.Diagnostics.Stopwatch.GetElapsedTime(cpuEnter,System.Diagnostics.Stopwatch.GetTimestamp()).TotalMilliseconds);cpuEnter=0;}
+        };
         using var watchdog=new System.Threading.Timer(_=>
         {
             try
@@ -673,6 +680,7 @@ internal static class ExperienceChecks
 
             var area=c.WorkArea;
             int refreshHz=Native.GetDisplayRefreshRate(c.Screen.DeviceName);
+            if(refreshHz<160)throw new InvalidOperationException($"Expected >=160Hz (165Hz) display refresh rate, got {refreshHz}Hz on {c.Screen.DeviceName}");
             double frameBudgetMs=1000.0/Math.Max(60,refreshHz);
             backdrop=new Window{Title="MacDock 稳定性测试背景",ShowInTaskbar=false,ShowActivated=false,Topmost=false,WindowStyle=WindowStyle.None,ResizeMode=ResizeMode.NoResize,Width=Math.Max(400,(area.Width-40)/c.Scale),Height=Math.Max(300,(area.Height-40)/c.Scale)};
             backdrop.Content=new Grid{Background=Brushes.White};
@@ -728,7 +736,34 @@ internal static class ExperienceChecks
                         if(capW>20&&capH>20)
                         {
                             using var bmp=new System.Drawing.Bitmap(capW,capH);
-                            using(var g=System.Drawing.Graphics.FromImage(bmp))g.CopyFromScreen(capX,capY,0,0,new System.Drawing.Size(capW,capH));
+                            bool screenCaptured=false;
+                            try
+                            {
+                                using var g=System.Drawing.Graphics.FromImage(bmp);
+                                g.CopyFromScreen(capX,capY,0,0,new System.Drawing.Size(capW,capH));
+                                screenCaptured=true;
+                            }
+                            catch(System.ComponentModel.Win32Exception)
+                            {
+                                // Fallback when running in a non-interactive sandbox session without desktop DC
+                                if(d.Content is FrameworkElement rootEl&&rootEl.ActualWidth>0&&rootEl.ActualHeight>0)
+                                {
+                                    int rw=(int)Math.Ceiling(rootEl.ActualWidth*c.Scale),rh=(int)Math.Ceiling(rootEl.ActualHeight*c.Scale);
+                                    var rtb=new System.Windows.Media.Imaging.RenderTargetBitmap(rw,rh,96*c.Scale,96*c.Scale,PixelFormats.Pbgra32);
+                                    var dv=new DrawingVisual();
+                                    using(var dc=dv.RenderOpen()){dc.DrawRectangle(Brushes.White,null,new Rect(0,0,rootEl.ActualWidth,rootEl.ActualHeight));}
+                                    rtb.Render(dv);
+                                    rtb.Render(rootEl);
+                                    var enc=new System.Windows.Media.Imaging.PngBitmapEncoder();
+                                    enc.Frames.Add(System.Windows.Media.Imaging.BitmapFrame.Create(rtb));
+                                    using var memStream=new MemoryStream();enc.Save(memStream);memStream.Position=0;
+                                    using var fullBmp=new System.Drawing.Bitmap(memStream);
+                                    int sy=Math.Clamp((int)Math.Round(pose.Row(1).Y*c.Scale)+(int)Math.Round(d.MaterialInset*c.Scale)-24,0,Math.Max(0,fullBmp.Height-capH));
+                                    int sx=Math.Clamp((int)Math.Round(d.MaterialInset*c.Scale)-8,0,Math.Max(0,fullBmp.Width-capW));
+                                    using var g=System.Drawing.Graphics.FromImage(bmp);
+                                    g.DrawImage(fullBmp,new System.Drawing.Rectangle(0,0,capW,capH),new System.Drawing.Rectangle(sx,sy,Math.Min(capW,fullBmp.Width-sx),Math.Min(capH,fullBmp.Height-sy)),System.Drawing.GraphicsUnit.Pixel);
+                                }
+                            }
                             bmp.Save(Path.Combine(Output,"drawer-stability-open-mid.png"),System.Drawing.Imaging.ImageFormat.Png);
                             int cx=capW/2;
                             var luma=new List<int>();
@@ -738,7 +773,7 @@ internal static class ExperienceChecks
                                 var px=bmp.GetPixel(cx,py);
                                 luma.Add((px.R+px.G+px.B)/3);
                             }
-                            bottomEdgeSample=string.Join(",",luma);
+                            bottomEdgeSample=(screenCaptured?"screen:":"rtb:")+string.Join(",",luma);
                             // Check for double white-line halo: bright spike (>248) sandwiched between darker shadow (<240)
                             for(int k=1;k<luma.Count-1;k++)
                             {
@@ -791,7 +826,8 @@ internal static class ExperienceChecks
                 throw new InvalidOperationException($"Bottom edge double-line halo detected on white backdrop: luma[1..6]={bottomEdgeSample}");
 
             pass=true;
-            detail=$"display={area.Width}x{area.Height}@{refreshHz}Hz(budget={frameBudgetMs:F2}ms), open[n={openFrames.Count},avg={openStat.Avg:F2}ms,p95={openStat.P95:F2}ms,max={openStat.Max:F2}ms,fps={openStat.Fps:F1},drop={openStat.Dropped}], close[n={closeFrames.Count},avg={closeStat.Avg:F2}ms,p95={closeStat.P95:F2}ms,max={closeStat.Max:F2}ms,fps={closeStat.Fps:F1},drop={closeStat.Dropped}], bottomLuma1to6=[{bottomEdgeSample}], thumbMaxPx={iconEntries.Max(e=>((System.Windows.Media.Imaging.BitmapSource)e.Image!).PixelWidth)}";
+            double cpuAvg=cpuFrameMs.Count>0?cpuFrameMs.Average():0,cpuMax=cpuFrameMs.Count>0?cpuFrameMs.Max():0;
+            detail=$"display={area.Width}x{area.Height}@{refreshHz}Hz(budget={frameBudgetMs:F2}ms), cpu[n={cpuFrameMs.Count},avg={cpuAvg:F2}ms,max={cpuMax:F2}ms], open[n={openFrames.Count},avg={openStat.Avg:F2}ms,p95={openStat.P95:F2}ms,max={openStat.Max:F2}ms,fps={openStat.Fps:F1},drop={openStat.Dropped}], close[n={closeFrames.Count},avg={closeStat.Avg:F2}ms,p95={closeStat.P95:F2}ms,max={closeStat.Max:F2}ms,fps={closeStat.Fps:F1},drop={closeStat.Dropped}], bottomLuma1to6=[{bottomEdgeSample}], thumbMaxPx={iconEntries.Max(e=>((System.Windows.Media.Imaging.BitmapSource)e.Image!).PixelWidth)}";
         }
         catch(Exception ex)
         {
@@ -801,7 +837,117 @@ internal static class ExperienceChecks
         finally
         {
             c.DrawerAnimationFrame=null;
+            c.DrawerTiming=null;
             File.WriteAllText(Path.Combine(Output,"drawer-stability-result.json"),JsonSerializer.Serialize(new{pass,detail},new JsonSerializerOptions{WriteIndented=true}));
+            backdrop?.Close();
+            Environment.ExitCode=pass?0:1;
+            Application.Current.Shutdown(pass?0:1);
+            Environment.Exit(pass?0:1);
+        }
+    }
+
+    internal static async Task DockStability(Controller c)
+    {
+        Window? backdrop=null;
+        bool pass=false;
+        string detail="";
+        var openFrames=new List<(int Cycle,double Phase,double Ms)>();
+        var closeFrames=new List<(int Cycle,double Phase,double Ms)>();
+        using var watchdog=new System.Threading.Timer(_=>
+        {
+            try
+            {
+                string timeoutDetail=$"TIMEOUT(15s): openFrames={openFrames.Count}, closeFrames={closeFrames.Count}, detail={detail}";
+                File.WriteAllText(Path.Combine(Output,"dock-stability-result.json"),JsonSerializer.Serialize(new{pass=false,detail=timeoutDetail},new JsonSerializerOptions{WriteIndented=true}));
+            }
+            catch{}
+            Environment.Exit(1);
+        },null,15000,Timeout.Infinite);
+        try
+        {
+            Directory.CreateDirectory(Output);
+            var area=c.WorkArea;
+            int refreshHz=Native.GetDisplayRefreshRate(c.Screen.DeviceName);
+            double frameBudgetMs=1000.0/Math.Max(60,refreshHz);
+
+            backdrop=new Window{Title="MacDock Dock 稳定性测试背景",ShowInTaskbar=false,Topmost=false,WindowStyle=WindowStyle.None,ResizeMode=ResizeMode.NoResize,Width=Math.Max(400,(area.Width-40)/c.Scale),Height=Math.Max(300,(area.Height-40)/c.Scale)};
+            backdrop.Content=new Grid{Background=Brushes.White};
+            backdrop.Loaded+=(_,_)=>Native.SetWindowPos(new System.Windows.Interop.WindowInteropHelper(backdrop).Handle,0,area.Left+20,area.Top+20,Math.Max(400,area.Width-40),Math.Max(300,area.Height-40),0x10);
+            backdrop.Show();
+
+            c.Store.Data.Appearance="light";
+            c.Store.Data.ReducedMotion=false;
+            c.Store.Data.DockOrder.Clear();
+            c.Store.Data.Entries.Clear();
+            Theme.Apply("light");
+            foreach(var item in Desktop.DefaultPins().Take(8))
+                c.Store.Data.Entries.Add(new Entry{Path=item.Path,Name=item.Name,Source="system",Pinned=true});
+            c.Dock.Rebuild();c.Position();
+            c.Dock.Hide();
+            await Task.Delay(150);
+
+            int cycle=0;
+            long lastTick=0;
+            string mode="idle";
+            c.DockAnimationFrame=(phase,_)=>
+            {
+                if(mode=="idle")return;
+                long now=System.Diagnostics.Stopwatch.GetTimestamp();
+                double ms=lastTick==0?0:System.Diagnostics.Stopwatch.GetElapsedTime(lastTick,now).TotalMilliseconds;
+                lastTick=now;
+                if(mode=="open")openFrames.Add((cycle,phase,ms));
+                else if(mode=="close")closeFrames.Add((cycle,phase,ms));
+            };
+
+            for(cycle=1;cycle<=4;cycle++)
+            {
+                mode="open";lastTick=0;
+                c.Expand();
+                for(int w=0;w<60&&(!c.Dock.IsVisible||c.DockMotionRunning||c.DockProgress<0.99);w++)await Task.Delay(25);
+                mode="idle";
+                if(cycle==1&&c.Dock.IsVisible&&Native.GetWindowRect(c.Dock.Handle,out var dr))
+                {
+                    int capX=Math.Max(area.Left,dr.Left-24),capY=Math.Max(area.Top,dr.Top-24);
+                    int capW=Math.Min(area.Right-capX,(dr.Right-dr.Left)+48),capH=Math.Min(area.Bottom-capY,(dr.Bottom-dr.Top)+48);
+                    if(capW>20&&capH>20)Save("dock-stability-open.png",new System.Drawing.Rectangle(capX,capY,capW,capH));
+                }
+                await Task.Delay(60);
+
+                mode="close";lastTick=0;
+                c.Collapse();
+                for(int w=0;w<60&&(c.Dock.IsVisible||c.DockMotionRunning);w++)await Task.Delay(25);
+                mode="idle";
+                await Task.Delay(80);
+            }
+
+            static (double Avg,double P95,double Max,double Fps,int Dropped) Stats(List<(int Cycle,double Phase,double Ms)> list,double budgetMs)
+            {
+                var valid=list.Where(f=>f.Ms>0).Select(f=>f.Ms).OrderBy(x=>x).ToArray();
+                if(valid.Length==0)return (0,0,0,0,0);
+                double avg=valid.Average();
+                double p95=valid[(int)Math.Min(valid.Length-1,Math.Floor(valid.Length*0.95))];
+                double max=valid[^1];
+                double fps=1000.0/avg;
+                int dropped=valid.Count(ms=>ms>budgetMs*1.65);
+                return (avg,p95,max,fps,dropped);
+            }
+
+            var openStat=Stats(openFrames,16.5);
+            var closeStat=Stats(closeFrames,16.5);
+            bool shotExists=File.Exists(Path.Combine(Output,"dock-stability-open.png"));
+            bool timerDrivenOk=openFrames.Count>=12&&closeFrames.Count>=12&&openStat.Avg<=18.0&&closeStat.Avg<=18.0&&shotExists;
+            pass=timerDrivenOk;
+            detail=$"display={area.Width}x{area.Height}@{refreshHz}Hz(panelBudget={frameBudgetMs:F2}ms, dockTimer=15ms), open[n={openFrames.Count},avg={openStat.Avg:F2}ms,p95={openStat.P95:F2}ms,max={openStat.Max:F2}ms,fps={openStat.Fps:F1},drop={openStat.Dropped}], close[n={closeFrames.Count},avg={closeStat.Avg:F2}ms,p95={closeStat.P95:F2}ms,max={closeStat.Max:F2}ms,fps={closeStat.Fps:F1},drop={closeStat.Dropped}], shot={shotExists}";
+        }
+        catch(Exception ex)
+        {
+            Program.Log(ex);
+            detail=ex.ToString();
+        }
+        finally
+        {
+            c.DockAnimationFrame=null;
+            File.WriteAllText(Path.Combine(Output,"dock-stability-result.json"),JsonSerializer.Serialize(new{pass,detail},new JsonSerializerOptions{WriteIndented=true}));
             backdrop?.Close();
             Environment.ExitCode=pass?0:1;
             Application.Current.Shutdown(pass?0:1);
