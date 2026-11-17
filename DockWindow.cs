@@ -20,7 +20,7 @@ internal sealed class DockWindow : GlassWindow
     Border? drawerButton;
     GatewayVisual? drawerGlyph;
     double gatewayPhase;
-    readonly Border glassTint=new(){IsHitTestVisible=false};
+    readonly CoverageBorder glassTint=new(){IsHitTestVisible=false,BorderThickness=new Thickness(0)};
     readonly Canvas glassLayer=new(){IsHitTestVisible=false};
     readonly Border contentHost;
     readonly TranslateTransform sheetLift=new();

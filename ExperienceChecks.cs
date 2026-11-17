@@ -911,7 +911,26 @@ internal static class ExperienceChecks
                     var scr=c.Screen.Bounds;
                     int capX=Math.Max(scr.Left,dr.Left-24),capY=Math.Max(scr.Top,dr.Top-24);
                     int capW=Math.Min(scr.Right-capX,(dr.Right-dr.Left)+48),capH=Math.Min(scr.Bottom-capY,(dr.Bottom-dr.Top)+48);
-                    if(capW>20&&capH>20)Save("dock-stability-open.png",new System.Drawing.Rectangle(capX,capY,capW,capH));
+                    if(capW>20&&capH>20)
+                    {
+                        var shotPath=Path.Combine(Output,"dock-stability-open.png");
+                        Save("dock-stability-open.png",new System.Drawing.Rectangle(capX,capY,capW,capH));
+                        using var shotBmp=new System.Drawing.Bitmap(shotPath);
+                        int ox=dr.Left-capX,oy=dr.Top-capY,radPx=(int)Math.Round(c.Dock.MaterialRadius*c.Scale);
+                        int darkEdge=0;
+                        for(int y=0;y<Math.Min(radPx,shotBmp.Height-oy);y++)
+                        for(int x=0;x<Math.Min(radPx,shotBmp.Width-ox);x++)
+                        {
+                            double dist=Math.Sqrt(Math.Pow(radPx-x-0.5,2)+Math.Pow(radPx-y-0.5,2));
+                            if(dist>radPx+2.5)
+                            {
+                                var px=shotBmp.GetPixel(ox+x,oy+y);
+                                int luma=(px.R+px.G+px.B)/3;
+                                if(luma<140)darkEdge++;
+                            }
+                        }
+                        if(darkEdge>0)throw new InvalidOperationException($"Dock corner dark fringe detected: darkEdge={darkEdge}");
+                    }
                 }
                 await Task.Delay(60);
 

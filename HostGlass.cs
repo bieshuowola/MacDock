@@ -98,9 +98,8 @@ internal sealed class HostGlass:IDisposable
             // wedges when the two compositors consume the handoff in different frames.
             if(changing){var shape=DockMotion.Shape(widthPixels,heightPixels,radiusPixels,reveal);var next=compositor.CreateRoundedRectangleGeometry();next.Offset=new Vector2((float)shape.Bounds.X,(float)shape.Bounds.Y);next.Size=new Vector2((float)shape.Bounds.Width,(float)shape.Bounds.Height);next.CornerRadius=new Vector2((float)shape.Radius);var ready=compositor.CreateGeometricClip(next);var priorClip=clip;var priorGeometry=geometry;geometry=next;clip=ready;root.Clip=ready;priorClip.Dispose();priorGeometry.Dispose();}
             else{ApplyReveal();root.Clip=clip;}
-            // The integer input region must contain the compositor's antialiased edge.
-            // Exact visual coverage remains owned by the floating point geometric clip.
-            int inputRadius=Math.Max(0,radiusPixels-2);var round=CreateRoundRectRgn(0,0,widthPixels+1,heightPixels+1,2*inputRadius,2*inputRadius);if(round!=0&&SetWindowRgn(window,round,false)==0)DeleteObject(round);
+            // Keep full per-pixel antialiased compositor clip without GDI 1-bit SetWindowRgn hard clipping.
+            if(changing)SetWindowRgn(window,0,false);
             backdrop.IsVisible=true;foreach(var strip in ribbon)strip.IsVisible=false;
             // Restore the independent rounded shadow, never the full-client native
             // glass frame, which is outside the Composition geometric clip.
