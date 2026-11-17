@@ -5,6 +5,7 @@ using System.Windows.Input;
 using System.Windows.Interop;
 using System.Windows.Media;
 using System.Windows.Media.Animation;
+using System.Windows.Media.Imaging;
 using Brushes = System.Windows.Media.Brushes;
 using Color = System.Windows.Media.Color;
 using Point = System.Windows.Point;
@@ -65,6 +66,7 @@ internal sealed class DrawerWindow : GlassWindow
     internal double EntranceScale=>entrance.ScaleX;
     internal void SetEntranceScale(double value){entrance.ScaleX=value;entrance.ScaleY=value;}
     GenieVisual? genie;
+    Border? bakedGenieSurface;
     bool deforming,meshAttached;double genieWidth,genieHeight,genieFrame;
     GeniePose? prevDeformPose;
     Layout? appliedLayout;
@@ -143,8 +145,9 @@ internal sealed class DrawerWindow : GlassWindow
                 genieWidth=PanelWidth;genieHeight=PanelHeight;genieFrame=frame;
                 genie=new GenieVisual(PanelWidth,frame,shareShadow);
             }
+            var targetSurface=BakeGenieSurface();
             stage.Children.Clear();AddLogicalChild(Surface);meshAttached=true;
-            genie.Attach(Surface);genie.Set(pose);stage.Children.Add(genie.View);
+            genie.Attach(targetSurface);genie.Set(pose);stage.Children.Add(genie.View);
             if(IsVisible)stage.UpdateLayout();
         }
         genie!.Set(pose);
@@ -182,11 +185,69 @@ internal sealed class DrawerWindow : GlassWindow
         SetMaterialGenie(null);
         owner.DrawerLayerFrame?.Invoke("end-normal-backdrop",MaterialSnapshot);
         SetSurfaceOpacity(1);
-        // Hidden drawers can keep their live controls attached to the mesh.
-        // The next opening can reuse that scene instead of detaching and rebuilding
-        // its visual host. A visible drawer still returns to pixel-aligned 2D controls.
-        if(!retainHiddenMesh||IsVisible){UseFlatSurface();UpdateLayout();}
+        UseFlatSurface();
+        if(!retainHiddenMesh||IsVisible)UpdateLayout();
         owner.DrawerLayerFrame?.Invoke("end-after-layout",MaterialSnapshot);
+    }
+
+    FrameworkElement BakeGenieSurface()
+    {
+        var live=Surface!;
+        double w=Math.Max(1,PanelWidth);
+        double h=Math.Max(1,PanelHeight);
+        if(!live.IsArrangeValid||Math.Abs(live.RenderSize.Width-w)>0.5||Math.Abs(live.RenderSize.Height-h)>0.5)
+        {
+            var size=new Size(w,h);
+            live.Measure(size);
+            live.Arrange(new Rect(size));
+            live.UpdateLayout();
+        }
+        double scale=Math.Max(1,owner.Scale);
+        int pxW=Math.Max(1,(int)Math.Round(w*scale));
+        int pxH=Math.Max(1,(int)Math.Round(h*scale));
+        double dpi=96.0*scale;
+        var dv=new DrawingVisual();
+        using(var dc=dv.RenderOpen())
+        {
+            var vb=new VisualBrush(live)
+            {
+                Stretch=Stretch.None,
+                AlignmentX=AlignmentX.Left,
+                AlignmentY=AlignmentY.Top,
+                Viewbox=new Rect(0,0,w,h),
+                ViewboxUnits=BrushMappingMode.Absolute
+            };
+            dc.DrawRectangle(vb,null,new Rect(0,0,w,h));
+        }
+        var rtb=new RenderTargetBitmap(pxW,pxH,dpi,dpi,PixelFormats.Pbgra32);
+        rtb.Render(dv);
+        rtb.Freeze();
+        var brush=new ImageBrush(rtb)
+        {
+            Stretch=Stretch.Fill,
+            TileMode=TileMode.None,
+            AlignmentX=AlignmentX.Left,
+            AlignmentY=AlignmentY.Top
+        };
+        RenderOptions.SetBitmapScalingMode(brush,BitmapScalingMode.Linear);
+        brush.Freeze();
+        bakedGenieSurface=new Border
+        {
+            Width=w,
+            Height=h,
+            Background=brush,
+            IsHitTestVisible=false
+        };
+        return bakedGenieSurface;
+    }
+
+    void ReleaseBakedGenieSurface()
+    {
+        if(bakedGenieSurface!=null)
+        {
+            bakedGenieSurface.Background=null;
+            bakedGenieSurface=null;
+        }
     }
     readonly Border segment;
     readonly DockPanel toolbar,footer;
@@ -560,6 +621,7 @@ internal sealed class DrawerWindow : GlassWindow
             stage.Children.Clear();genie!.Detach();meshAttached=false;
             RemoveLogicalChild(Surface);stage.Children.Add(Surface!);
         }
+        ReleaseBakedGenieSurface();
         Surface!.Width=PanelWidth;Surface.Height=PanelHeight;
         Surface.HorizontalAlignment=HorizontalAlignment.Left;Surface.VerticalAlignment=VerticalAlignment.Top;
     }
