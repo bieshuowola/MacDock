@@ -17,28 +17,33 @@ internal sealed class PointerHook : IDisposable
     uint threadId;
     nint hook;
     nint keyHook;
-    volatile bool desktopWakeKeyHeld;
+    readonly Action<int>? wakePressed;
+    volatile int wakeKey;
+    int heldWakeKey;
+    bool consumedGrave;
     internal static int Installations;
     internal static bool AuditInput;
     internal static long NonInjectedInputs;
     volatile bool disposed;
 
     public bool Available => hook != 0;
-    internal bool DesktopWakeKeyHeld => desktopWakeKeyHeld;
+    internal void SetWakeKey(int key) => wakeKey=key;
 
-    public PointerHook(Action<Native.Point,bool> handler,Func<Native.Point,uint,uint,bool>? filter=null,bool suppressDesktopSearch=false)
+    public PointerHook(Action<Native.Point,bool> handler,Func<Native.Point,uint,uint,bool>? filter=null,int wakeKey=0,Action<int>? wakePressed=null)
     {
         this.handler = handler;
         this.filter=filter;
+        this.wakeKey=wakeKey;
+        this.wakePressed=wakePressed;
         proc = Callback;
-        keyProc = FilterDesktopKey;
+        keyProc = FilterWakeKey;
         var ready = new ManualResetEventSlim();
         thread = new Thread(() =>
         {
             threadId = Native.GetCurrentThreadId();
             Native.PeekMessage(out _, 0, 0, 0, 0); // force a message queue before installing the hook
             hook = Native.SetWindowsHookEx(14, proc, Native.GetModuleHandle(null), 0);
-            if(suppressDesktopSearch)keyHook=Native.SetWindowsHookEx(13,keyProc,Native.GetModuleHandle(null),0);
+            if(wakePressed!=null)keyHook=Native.SetWindowsHookEx(13,keyProc,Native.GetModuleHandle(null),0);
             Interlocked.Increment(ref Installations);
             ready.Set();
             while (!disposed && Native.GetMessage(out var message, 0, 0, 0) > 0)
@@ -48,7 +53,6 @@ internal sealed class PointerHook : IDisposable
             }
             if (hook != 0) { Native.UnhookWindowsHookEx(hook); hook = 0; }
             if (keyHook != 0) { Native.UnhookWindowsHookEx(keyHook); keyHook = 0; }
-            desktopWakeKeyHeld=false;
         })
         { IsBackground = true, Priority = ThreadPriority.BelowNormal, Name = "MacDock pointer hook" };
         thread.SetApartmentState(ApartmentState.STA);
@@ -56,23 +60,31 @@ internal sealed class PointerHook : IDisposable
         ready.Wait(2000);
     }
 
-    nint FilterDesktopKey(int code,nint message,nint data)
+    nint FilterWakeKey(int code,nint message,nint data)
     {
-        if(code>=0&&!disposed&&Marshal.PtrToStructure<Native.LowLevelKey>(data) is
-            {VirtualKey:Native.GraveWakeKey,Scan:0x29})
+        if(code<0||disposed)return Native.CallNextHookEx(keyHook,code,message,data);
+        var input=Marshal.PtrToStructure<Native.LowLevelKey>(data);
+        int physical=(int)input.VirtualKey;
+        int generic=physical switch {0xA0 or 0xA1=>0x10,0xA2 or 0xA3=>0x11,0xA4 or 0xA5=>0x12,_=>physical};
+        int binding=wakeKey;
+        if(message is 0x101 or 0x105)
         {
-            if(desktopWakeKeyHeld)
+            if(physical==heldWakeKey)heldWakeKey=0;
+            if(physical==Native.GraveWakeKey&&consumedGrave){consumedGrave=false;return 1;}
+        }
+        else if(message is 0x100 or 0x104)
+        {
+            if(physical==Native.GraveWakeKey&&consumedGrave)return 1;
+            // The async state still reflects the preceding event inside WH_KEYBOARD_LL.
+            if((binding==physical||binding==generic)&&heldWakeKey!=physical&&!Native.KeyHeld(binding))
             {
-                if(message is 0x101 or 0x105)desktopWakeKeyHeld=false;
-                return 1;
-            }
-            // Let a press that began in another app keep its repeats and release there.
-            if(message==0x100&&!Native.KeyHeld(Native.GraveWakeKey)&&!Native.KeyHeld(0x10)&&
-                !Native.KeyHeld(0x11)&&!Native.KeyHeld(0x12)&&!Native.KeyHeld(0x5B)&&!Native.KeyHeld(0x5C)&&
-                Native.DesktopSearchHasFocus())
-            {
-                desktopWakeKeyHeld=true;
-                return 1;
+                heldWakeKey=physical;
+                if(binding==Native.GraveWakeKey&&input.Scan==0x29&&message==0x100&&
+                    !Native.KeyHeld(0x10)&&!Native.KeyHeld(0x11)&&!Native.KeyHeld(0x12)&&
+                    !Native.KeyHeld(0x5B)&&!Native.KeyHeld(0x5C)&&Native.DesktopSearchHasFocus())
+                    consumedGrave=true;
+                try{wakePressed?.Invoke(binding);}catch(InvalidOperationException){}
+                if(consumedGrave)return 1;
             }
         }
         return Native.CallNextHookEx(keyHook,code,message,data);

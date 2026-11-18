@@ -333,7 +333,7 @@ internal sealed class DrawerWindow : GlassWindow
         owner = c; Title = "MacDock 应用抽屉";
         // A pressed control must not move away between its down and up. Sorting settles
         // only when its threshold is reached; a simple click uses the current live mesh.
-        PreviewMouseDown+=(_,a)=>{SetKeyboardTileFocus(false);var hit=a.OriginalSource as DependencyObject;var path=new List<string>();while(hit!=null&&path.Count<8){path.Add(hit.GetType().Name+(hit is FrameworkElement f?":"+System.Windows.Automation.AutomationProperties.GetName(f):""));hit=VisualTreeHelper.GetParent(hit);}LastPointerInput=string.Join("/",path)+" @ "+a.GetPosition(Surface).ToString()+" Surface="+Surface?.RenderSize.ToString();owner.PauseDrawerMotion();};
+        PreviewMouseDown+=(_,a)=>{DismissTileTip();var hit=a.OriginalSource as DependencyObject;var path=new List<string>();while(hit!=null&&path.Count<8){path.Add(hit.GetType().Name+(hit is FrameworkElement f?":"+System.Windows.Automation.AutomationProperties.GetName(f):""));hit=VisualTreeHelper.GetParent(hit);}LastPointerInput=string.Join("/",path)+" @ "+a.GetPosition(Surface).ToString()+" Surface="+Surface?.RenderSize.ToString();owner.PauseDrawerMotion();};
         AddHandler(Mouse.PreviewMouseUpEvent,new MouseButtonEventHandler((_,_)=>Dispatcher.BeginInvoke(()=>owner.ResumeDrawerMotion())),true);
         DragEnter+=(_,_)=>owner.SettleDrawerMotion();
         main.RenderTransformOrigin=new Point(.5,1);main.RenderTransform=entrance;
@@ -473,6 +473,10 @@ internal sealed class DrawerWindow : GlassWindow
         frameRoot.Children.Add(gatewayRibbon);
         Content = frameRoot;
         AllowDrop = true;
+        tileTipDelay.Tick+=(_,_)=>ShowTileTip();
+        PreviewDragEnter+=(_,_)=>DismissTileTip();
+        Deactivated+=(_,_)=>DismissTileTip();
+        IsVisibleChanged+=(_,_)=>{if(!IsVisible)DismissTileTip();};
         ShellDrop? desktopDrop=null;
         void EndDesktopDrop(){desktopDrop?.Dispose();desktopDrop=null;if((Native.GetAsyncKeyState(1)&0x8000)==0)c.SetExternalFileDrag(false);UpdateFooter();}
         void DesktopDrag(DragEventArgs a,bool enter){
@@ -631,6 +635,7 @@ internal sealed class DrawerWindow : GlassWindow
         {
             if(a.Handled)return;
             a.Handled=true;
+            if(PointerSort.Active!=null||owner.InternalDragging)return;
             if(a.CursorLeft<0&&a.CursorTop<0&&TryKeyboardMenu())return;
             c.MenuOpen=true;Dispatcher.BeginInvoke(c.ShowDesktopBackground);
         };
@@ -645,6 +650,7 @@ internal sealed class DrawerWindow : GlassWindow
         scroll.ScrollChanged += (_, e) =>
         {
             if(Math.Abs(e.VerticalChange)<=.01)return;
+            DismissTileTip();
             InvalidatePrebakedSurface(scheduleIdleWarm:false);
             scrollBakeIdle.Stop();
             if(IsVisible&&!deforming)scrollBakeIdle.Start();
@@ -691,14 +697,14 @@ internal sealed class DrawerWindow : GlassWindow
         appliedLayout=l;appliedScale=owner.Scale;
         Width = Math.Round(l.DrawerWidth*owner.Scale)/owner.Scale+2*MaterialInset; Height = FrameHeight+2*MaterialInset;
         UseFlatSurface();
-        var (tileW, _, gridW, chrome) = GridMetrics(l);
+        var (tileW, gapX, gridW, chrome) = GridMetrics(l);
         scroll.Height = l.GridHeight;
         main.Margin = new Thickness(chrome, l.DrawerPadTop, chrome, l.DrawerPadBottom);
         search.Height = l.SearchHeight;
         search.FontSize=placeholder.FontSize=Math.Clamp(13*l.Unit,13,15);count.FontSize=Math.Clamp(12*l.Unit,12,14);
         toolbar.Height=l.ToolbarHeight;searchHost.Height=l.SearchHeight;footer.Height=l.FooterHeight;
         gap1.Height=0;gap2.Height=16*l.Unit;gap3.Height=10*l.Unit;
-        searchHost.Width=Math.Clamp(PanelWidth-chrome*2-210,0,280);
+        searchHost.Width=Math.Min(tileW+gapX+l.DrawerIcon,Math.Max(0,PanelWidth-chrome*2-210));
         groups.Width = owner.Store.Data.ListView ? double.NaN : gridW;
         groups.HorizontalAlignment = owner.Store.Data.ListView ? HorizontalAlignment.Stretch : HorizontalAlignment.Center;
         PlaceScrollChrome(gridW,tileW,chrome);
@@ -829,12 +835,59 @@ internal sealed class DrawerWindow : GlassWindow
     bool Editing => search.IsKeyboardFocusWithin;
     internal bool TextInputActive=>Editing;
     string? cursorId;
-    bool keyboardTileFocus;
-    void SetKeyboardTileFocus(bool active)
+    readonly DispatcherTimer tileTipDelay=new(){Interval=TimeSpan.FromMilliseconds(900)};
+    readonly ToolTip tileTip=new()
     {
-        if (keyboardTileFocus == active) return;
-        keyboardTileFocus = active;
-        if (cursorId != null && tiles.TryGetValue(cursorId, out var tile)) PaintTile(tile);
+        Placement=PlacementMode.Mouse,StaysOpen=true,IsHitTestVisible=false,MaxWidth=400
+    };
+    Border? tipTile;
+    Native.Point tipPointer;
+    internal string? VisibleTileTip => tileTip.IsOpen ? (tileTip.Content as TextBlock)?.Text : null;
+    internal double SearchWidth => searchHost.Width;
+
+    internal void DismissTileTip()
+    {
+        tileTipDelay.Stop();
+        tileTip.IsOpen=false;
+        tileTip.PlacementTarget=null;
+        tipTile=null;
+    }
+
+    internal void TrackTileTip(Border tile)
+    {
+        if(!IsVisible||IsDeforming||owner.InternalDragging||owner.ExternalFileDragActive||owner.MenuOpen||owner.Busy||
+            Mouse.LeftButton==MouseButtonState.Pressed||Mouse.RightButton==MouseButtonState.Pressed||
+            !Native.GetCursorPos(out var cursor))
+        {
+            DismissTileTip();
+            return;
+        }
+        if(tipTile==tile&&Math.Abs(cursor.X-tipPointer.X)<=2&&Math.Abs(cursor.Y-tipPointer.Y)<=2)return;
+        if(tipTile==tile&&tileTip.IsOpen)return;
+        DismissTileTip();
+        tipTile=tile;
+        tipPointer=cursor;
+        tileTipDelay.Start();
+    }
+
+    void ShowTileTip()
+    {
+        tileTipDelay.Stop();
+        if(tipTile is not {IsMouseOver:true,IsVisible:true,Tag:Entry entry} tile||
+            owner.InternalDragging||owner.ExternalFileDragActive||owner.Busy||owner.MenuOpen||IsDeforming||
+            !Native.GetCursorPos(out var cursor)||Native.WindowFromPoint(cursor)!=Handle||
+            Mouse.LeftButton==MouseButtonState.Pressed||Mouse.RightButton==MouseButtonState.Pressed)
+        {
+            DismissTileTip();
+            return;
+        }
+        var filename=entry.IsVirtual?entry.Name:Path.GetFileName(entry.Path);
+        var text=Theme.Text(string.IsNullOrEmpty(filename)?entry.Name:filename,12.5);
+        text.MaxWidth=360;
+        text.TextWrapping=TextWrapping.Wrap;
+        tileTip.Content=text;
+        tileTip.PlacementTarget=tile;
+        tileTip.IsOpen=true;
     }
 
     bool TryKeyboardMenu()
@@ -846,14 +899,15 @@ internal sealed class DrawerWindow : GlassWindow
 
     internal void OpenItemMenu(Border tile,bool keyboard)
     {
-        if(tile.Tag is not Entry entry)return;
+        if(tile.Tag is not Entry entry||PointerSort.Active!=null||owner.InternalDragging)return;
+        owner.Dock.ClearDoubleClickState();
         var selection=Selection;
         if(selection.Count==0)selection=new[]{entry};
         bool sameParent=selection.Count==1||selection.All(e=>!e.IsVirtual)&&selection.Select(e=>Path.GetDirectoryName(e.Path)).Distinct(StringComparer.OrdinalIgnoreCase).Count()==1;
         owner.MenuOpen=true;
         Dispatcher.BeginInvoke(()=>
         {
-            if(!IsVisible||!tile.IsLoaded){owner.MenuOpen=false;return;}
+            if(!IsVisible||!tile.IsLoaded||PointerSort.Active!=null||owner.InternalDragging){owner.MenuOpen=false;return;}
             if(!selection.Any(e=>e.IsAlias)&&sameParent)
             {
                 Native.Point? position=null;
@@ -915,7 +969,7 @@ internal sealed class DrawerWindow : GlassWindow
     internal void ClearSelection()
     {
         bool had = selected.Count > 0 || anchor != null || cursorId != null;
-        selected.Clear(); anchor = null; cursorId = null; keyboardTileFocus = false;
+        selected.Clear(); anchor = null; cursorId = null;
         if (had) ApplySelectionVisuals();
         else UpdateFooter();
     }
@@ -956,12 +1010,12 @@ internal sealed class DrawerWindow : GlassWindow
         if (Surface == null) return null;
         foreach (var entry in visibleOrder)
         {
-            if (draggedIds.Contains(entry.Id) || !DockWindow.AcceptsFileDropTarget(entry)) continue;
+            if (draggedIds.Contains(entry.Id)) continue;
             if (!tiles.TryGetValue(entry.Id, out var tile) || tile.ActualWidth <= 0 || tile.ActualHeight <= 0) continue;
             var topLeft = tile.TransformToAncestor(Surface).Transform(new Point(0, 0));
             var bounds = new Rect(topLeft, new Size(tile.ActualWidth, tile.ActualHeight));
             double cx = bounds.Left + bounds.Width * 0.5, cy = bounds.Top + bounds.Height * 0.5;
-            if (Math.Abs(surfacePoint.X - cx) <= bounds.Width * 0.325 && Math.Abs(surfacePoint.Y - cy) <= bounds.Height * 0.325)
+            if (Math.Abs(surfacePoint.X - cx) <= bounds.Width * 0.325 && Math.Abs(surfacePoint.Y - cy) <= bounds.Height * 0.325 && Controller.ResolveDirectoryTarget(entry)!=null)
                 return entry;
         }
         return null;
@@ -972,10 +1026,10 @@ internal sealed class DrawerWindow : GlassWindow
         if(tile==dropTargetTile)return;
         if(tile.Tag is not Entry entry)return;
         bool singleClick=!owner.Store.Data.DoubleClickToOpen;
-        bool selectedTile=selected.Contains(entry.Id),focusedTile=keyboardTileFocus&&scroll.IsKeyboardFocused&&cursorId==entry.Id,hovered=tile.IsMouseOver;
+        bool selectedTile=selected.Contains(entry.Id),hovered=tile.IsMouseOver;
         tile.Cursor=singleClick?Cursors.Hand:Cursors.Arrow;
         tile.Background=Brushes.Transparent;
-        tile.BorderBrush=focusedTile?(SystemParameters.HighContrast?SystemColors.HighlightBrush:Theme.FocusEdge):Brushes.Transparent;
+        tile.BorderBrush=Brushes.Transparent;
         System.Windows.Automation.AutomationProperties.SetItemStatus(tile,selectedTile?"已选择":"");
         if(tile.Child is StackPanel panel)
         {
@@ -1041,7 +1095,6 @@ internal sealed class DrawerWindow : GlassWindow
 
     void Navigate(Key key,bool ctrl,bool shift)
     {
-        SetKeyboardTileFocus(true);
         if(visibleOrder.Count==0)return;
         int index=visibleOrder.FindIndex(e=>e.Id==cursorId);
         int next=key switch {Key.Home=>0,Key.End=>visibleOrder.Count-1,Key.Left=>index-1,Key.Right=>index+1,_=>index};
@@ -1125,7 +1178,7 @@ internal sealed class DrawerWindow : GlassWindow
         var current= pendingAnchor??CaptureScrollAnchor();
         UpdateModeVisuals();
         if (Surface is Border card) card.CornerRadius = new CornerRadius(MaterialRadius);
-        dropTargetTile = null; DropTargetEntry = null;
+        SetDropTarget(null);
         var l = owner.Layout;
         var q = search.Text.Trim();
         if(!string.Equals(q,renderedQuery,StringComparison.Ordinal))

@@ -22,7 +22,7 @@ internal sealed class PointerSort
     Action? external;
     Controller? owner;bool overDock;Func<bool>? sortAllowed;
     readonly ScaleTransform ghostScale=new();bool ghostDock;
-    Action? prepare;Point downLocal;bool preparing;
+    Action? prepare;bool preparing;
     IInputElement? focusBefore;
     bool reducedMotion;
     readonly DispatcherTimer timer=new(){Interval=TimeSpan.FromMilliseconds(35)};
@@ -50,9 +50,23 @@ internal sealed class PointerSort
     }
     internal static void Attach(FrameworkElement root,GlassWindow? window,Func<bool> allowed,Func<IReadOnlyList<FrameworkElement>> elements,Func<ScrollViewer?>? scroll,Action<IReadOnlyList<string>,string,int> commit,Action<bool> state,Action click,Action? select=null,Action? external=null,Func<bool>? reduced=null,Action? prepare=null,Controller? owner=null,Func<bool>? sortAllowed=null)
     {
-        root.PreviewMouseLeftButtonDown+=(_,a)=>{if(!allowed()||Native.IsControlDown()||Native.IsShiftDown()||(Keyboard.Modifiers&ModifierKeys.Alt)!=0)return;var host=Window.GetWindow(root) as GlassWindow??window;if(host==null)return;Active?.End(false);select?.Invoke();Native.GetCursorPos(out var sp);var session=new PointerSort(root,host,elements,scroll?.Invoke(),commit,state,click,a.GetPosition(host.Surface),sp){external=external,reducedMotion=reduced?.Invoke()==true,prepare=prepare,owner=owner,sortAllowed=sortAllowed,downLocal=a.GetPosition(root)};Active=session;root.CaptureMouse();a.Handled=true;};
+        root.PreviewMouseLeftButtonDown+=(_,a)=>
+        {
+            if(!allowed()||Native.IsControlDown()||Native.IsShiftDown()||(Keyboard.Modifiers&ModifierKeys.Alt)!=0)return;
+            var host=Window.GetWindow(root) as GlassWindow??window;
+            if(host==null)return;
+            Active?.End(false);
+            select?.Invoke();
+            Native.GetCursorPos(out var pointer);
+            var session=new PointerSort(root,host,elements,scroll?.Invoke(),commit,state,click,a.GetPosition(host.Surface),pointer)
+                {external=external,reducedMotion=reduced?.Invoke()==true,prepare=prepare,owner=owner,sortAllowed=sortAllowed};
+            Active=session;
+            if(!root.CaptureMouse()&&!session.CaptureOnFlatSurface())session.End(false);
+            a.Handled=true;
+        };
         root.PreviewMouseMove+=(_,a)=>{if(Active is not { } s||s.source!=root)return;a.Handled=true;if(a.LeftButton!=MouseButtonState.Pressed){s.End(false);return;}if(!s.started&&s.ExceededDragThreshold(a.GetPosition(s.window.Surface))){s.moved=true;s.Start();}if(s.started){s.moved=true;s.Update();}};
-        root.PreviewMouseLeftButtonUp+=(_,a)=>{if(Active is not { } s||s.source!=root)return;a.Handled=true;if(s.ExceededDragThreshold(a.GetPosition(s.window.Surface)))s.moved=true;s.End(true);};
+        root.PreviewMouseLeftButtonUp+=(_,a)=>{if(Active is not { } s||s.source!=root)return;a.Handled=true;if(s.ExceededDragThreshold(a.GetPosition(s.window.Surface)))s.moved=true;s.End(s.started||new Rect(root.RenderSize).Contains(a.GetPosition(root)));};
+        root.PreviewMouseRightButtonDown+=(_,_)=>{if(Active is {} s&&s.source==root)s.End(false);};
         root.LostMouseCapture+=(_,_)=>{if(Active is { } s&&s.source==root&&!s.preparing)s.End(false);};
         root.Unloaded+=(_,_)=>
         {
@@ -63,11 +77,26 @@ internal sealed class PointerSort
             s.End(false);
         };
     }
+    bool CaptureOnFlatSurface()
+    {
+        if(prepare==null)return false;
+        preparing=true;
+        try
+        {
+            prepare();
+            window.UpdateLayout();
+            if(window.Surface is not {} surface||!source.IsDescendantOf(surface))return false;
+            down=surface.PointFromScreen(new Point(downScreen.X,downScreen.Y));
+            return source.CaptureMouse();
+        }
+        finally{preparing=false;}
+    }
+
     void Start()
     {
         focusBefore=Keyboard.FocusedElement;
         LastFocusTrace="start="+focusBefore?.GetType().Name;
-        if(prepare!=null){preparing=true;try{prepare();window.UpdateLayout();var p=source.TransformToAncestor(window.Surface!).Transform(new Point());down=new Point(p.X+downLocal.X,p.Y+downLocal.Y);source.CaptureMouse();}finally{preparing=false;}}
+        if(prepare!=null&&!CaptureOnFlatSurface()){End(false);return;}
         started=true;moved=true;state(true);window.UpdateLayout();initialScroll=scroll?.VerticalOffset??0;
         if(ended)return;
         foreach(var view in elements()){
@@ -252,20 +281,26 @@ internal sealed class PointerSort
         Native.GetCursorPos(out var release);int pinIndex=owner?.Dock.PinDestination??-1;bool pin=overDock&&owner?.Dock.Contains(release)==true;
         var previous=owner?.Dock.PreviewingPin==true?owner.Dock.PinArtworkPositions():null;
         owner?.Dock.ClearPinPreview();
-        var dropTarget=(window as DrawerWindow)?.DropTargetEntry;
+        // The last preview tick may still describe the preceding pointer position.
+        var dropTarget=accept&&started&&owner!=null&&!pin&&!overDock&&window is DrawerWindow drawer&&drawer.Contains(release)
+            ?drawer.HitDropTarget(drawer.Surface!.PointFromScreen(new Point(release.X,release.Y)),draggedIds):null;
         (window as DrawerWindow)?.SetDropTarget(null);
         string? inserted=null;
         try
         {
-            source.ReleaseMouseCapture();
+            if(source.IsMouseCaptured)source.ReleaseMouseCapture();
             if(started)
             {
                 if(accept && dropTarget!=null && owner!=null)
                 {
                     owner.BeginInternalDropProtection();
-                    state(false);
-                    ghost?.Close();
-                    owner.DropEntriesToTarget(dropTarget,draggedEntries.ToArray(),Native.IsControlDown());
+                    try
+                    {
+                        state(false);
+                        ghost?.Close();
+                        owner.DropEntriesToTarget(dropTarget,draggedEntries.ToArray(),Native.IsControlDown());
+                    }
+                    finally { owner.EndInternalDropProtection(true); }
                 }
                 else
                 {

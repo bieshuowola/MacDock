@@ -4,6 +4,23 @@ using System.Windows;
 namespace MacDock;
 internal static class SortingChecks
 {
+    internal static void UseFixtureDesktop(Controller c,bool restart)
+    {
+        string folder=Path.Combine(Path.GetDirectoryName(c.Store.FilePath)!,"fixture-desktop");
+        Directory.CreateDirectory(folder);
+        c.OverrideDesktopFolder=folder;
+        if(restart)return;
+        c.Store.Data.Entries.Clear();
+        c.Store.Data.DockOrder.Clear();
+        for(int i=0;i<90;i++)
+        {
+            var path=Path.Combine(folder,$"Sort fixture {i:D2}.txt");
+            File.WriteAllText(path,$"fixture {i}");
+            c.Store.Add(path,false,source:"desktop");
+        }
+        c.Changed();
+    }
+
     internal static async Task Run(Controller c)
     {
         var output=Environment.GetEnvironmentVariable("MACDOCK_TEST_RESULTS")!;Directory.CreateDirectory(output);var results=new List<object>();

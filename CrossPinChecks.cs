@@ -7,6 +7,7 @@ internal static class CrossPinChecks
     internal static async Task Run(Controller c)
     {
         var output=Environment.GetEnvironmentVariable("MACDOCK_TEST_RESULTS")!;var records=new List<object>();
+        Window? rejectDrop=null;
         void Check(string name,bool pass,object? detail=null){records.Add(new{name,pass,detail});File.WriteAllText(Path.Combine(output,"cross-pin.json"),JsonSerializer.Serialize(records,new JsonSerializerOptions{WriteIndented=true}));if(!pass)throw new Exception(name);}
         try{
             var expectedProfile=Path.GetFullPath(Path.Combine(output,"profile","config.json"));
@@ -25,7 +26,19 @@ internal static class CrossPinChecks
                     new{index,slot,c.Dock.PreviewingPin,startHit=(long)startHit,drawer=(long)c.Drawer.Handle,c.Drawer.LastPointerInput,PointerSort.LastFocusTrace,point=new{point.X,point.Y},c.DrawerProgress});
                 if(!entry.Pinned)Check("live insertion preview exists",index>=0&&c.Dock.PreviewingPin);
                 if(slot==2&&!cancel&&!invalid){using var preview=new System.Drawing.Bitmap(c.Screen.Bounds.Width,c.Screen.Bounds.Height);using(var g=System.Drawing.Graphics.FromImage(preview))g.CopyFromScreen(c.Screen.Bounds.Location,System.Drawing.Point.Empty,preview.Size);preview.Save(Path.Combine(output,"insertion-preview.png"));}
-                if(invalid){Native.MovePointer(c.WorkArea.Left+12,c.WorkArea.Top+12);await Task.Delay(100);}if(cancel){Native.TestKey(27,true);await Task.Delay(60);Native.TestKey(27,false);}Native.TestButton(false);await Task.Delay(40);
+                if(invalid)
+                {
+                    rejectDrop=new Window
+                    {
+                        Title="MacDock invalid drop fixture",Width=160,Height=100,WindowStyle=WindowStyle.None,
+                        Topmost=true,ShowInTaskbar=false,ShowActivated=false
+                    };
+                    rejectDrop.Show();
+                    var hwnd=new System.Windows.Interop.WindowInteropHelper(rejectDrop).Handle;
+                    Native.SetWindowPos(hwnd,-1,c.WorkArea.Left+22,c.WorkArea.Top+22,0,0,0x11);
+                    Native.MovePointer(c.WorkArea.Left+55,c.WorkArea.Top+55);
+                    await Task.Delay(150);
+                }if(cancel){Native.TestKey(27,true);await Task.Delay(60);Native.TestKey(27,false);}Native.TestButton(false);await Task.Delay(40);
                 var scroll=c.Drawer.Scroller;var pointer=scroll.PointToScreen(new Point(scroll.ActualWidth*.5,scroll.ActualHeight*.4));double prior=scroll.VerticalOffset;Native.MovePointer((int)pointer.X,(int)pointer.Y);Native.TestWheel(prior>100?120:-120);await Task.Delay(220);
                 Native.GetCursorPos(out var actual);Check("wheel works after cross drag without clicking",Math.Abs(scroll.VerticalOffset-prior)>10,new{trace=c.Drawer.LastWheelInput,diagnostics=((SmoothScrollViewer)scroll).WheelDiagnostics,focus=System.Windows.Input.Keyboard.FocusedElement?.GetType().Name,raw=GlassWindow.LastRawWheel,point=pointer.ToString(),cursor=new{actual.X,actual.Y},hit=(long)Native.WindowFromPoint(actual),window=(long)c.Drawer.Handle,active=c.Drawer.IsActive,capture=System.Windows.Input.Mouse.Captured?.GetType().Name});scroll.ScrollToVerticalOffset(prior);await Task.Delay(60);
                 var expected=before.ToList();if(!cancel&&!invalid&&!expected.Contains(entry.Id))expected.Insert(index,entry.Id);
@@ -43,6 +56,6 @@ internal static class CrossPinChecks
             using var picture=new System.Drawing.Bitmap(c.Screen.Bounds.Width,c.Screen.Bounds.Height);using(var g=System.Drawing.Graphics.FromImage(picture))g.CopyFromScreen(c.Screen.Bounds.Location,System.Drawing.Point.Empty,picture.Size);picture.Save(Path.Combine(output,"cross-pin-final.png"));
             File.WriteAllText(Path.Combine(output,"expected-orders.json"),JsonSerializer.Serialize(new{drawer=c.Store.Data.Entries.Select(e=>e.Id),dock=c.Store.PinnedEntries().Select(e=>e.Id)}));
         }catch(Exception e){records.Add(new{name="error",pass=false,detail=(object)e.ToString()});}
-        finally{PointerSort.Active?.End(false);Native.TestButton(false);File.WriteAllText(Path.Combine(output,"cross-pin.json"),JsonSerializer.Serialize(records,new JsonSerializerOptions{WriteIndented=true}));Application.Current.Shutdown();}
+        finally{PointerSort.Active?.End(false);Native.TestButton(false);rejectDrop?.Close();File.WriteAllText(Path.Combine(output,"cross-pin.json"),JsonSerializer.Serialize(records,new JsonSerializerOptions{WriteIndented=true}));Application.Current.Shutdown();}
     }
 }

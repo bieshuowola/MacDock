@@ -19,6 +19,9 @@ internal static class Program
     [STAThread] public static int Main(string[] args)
     {
         Forms.Application.SetHighDpiMode(Forms.HighDpiMode.PerMonitorV2);
+#if MACDOCK_EXPERIENCE_CHECKS
+        if(args.Length>1&&args[0]=="--maintenance-fixture")return FieldInteractionChecks.Fixture(args);
+#endif
         if(args.Contains("--game-fixture"))return GameWakeChecks.Fixture(args[Array.IndexOf(args,"--game-fixture")+1]);
         if(args.Contains("--external-fixture"))return ExternalGlassChecks.Fixture(args[Array.IndexOf(args,"--external-fixture")+1]);
         if(args.Contains("--modal-test"))return TransitionChecks.Logic();
@@ -101,7 +104,9 @@ internal static class Program
                 {
                     try{File.Delete(Path.Combine(testProfile,"last-session.json"));}catch{}
                 }
-                c=new Controller(testProfile,autoHide:testing,skipDesktop:productPreview||dragE2E||externalDropPin||drawerStability||dockStability||drawerPasteReuse||fieldInteraction);
+                bool arrangementChecks=args.Contains("--cross-pin-test")||args.Contains("--sorting-test");
+                c=new Controller(testProfile,autoHide:testing,skipDesktop:productPreview||dragE2E||externalDropPin||drawerStability||dockStability||drawerPasteReuse||fieldInteraction||arrangementChecks);
+                if(arrangementChecks)SortingChecks.UseFixtureDesktop(c,args.Contains("--verify-restart"));
                 c.RecordSession(args,testing);
                 if(args.Contains("--first-run-test"))app.Dispatcher.BeginInvoke(DispatcherPriority.Normal,()=>{_=FirstRunChecks.Run(c);});
                 if(args.Contains("--settings-release-test"))app.Dispatcher.BeginInvoke(DispatcherPriority.Normal,()=>{_=SettingsReleaseChecks.Run(c);});
@@ -192,11 +197,11 @@ internal sealed class Controller : IDisposable
     public Layout Layout => new(WorkArea.Width/Scale,WorkArea.Height/Scale,Store.Data.DockCapacity,Store.Data.DrawerRows,Store.Data.DrawerColumns,DesktopView.IconSizeDip);
     internal bool AutoHideDock { get; set; }
     internal int SuppressWakeKey => Store.Data.SuppressWakeKey;
-    internal bool WakeSuppressedByKey => SuppressWakeKey>0&&
-        (Native.KeyHeld(SuppressWakeKey)||SuppressWakeKey==Native.GraveWakeKey&&hook?.DesktopWakeKeyHeld==true);
-    internal static bool ShouldSuppressDockByKey(bool wakeSuppressedByKey,bool menuOpen,bool busy,bool internalDragging,bool drawerVisible,bool textEditing)=>
-        wakeSuppressedByKey&&!menuOpen&&!busy&&!internalDragging&&!drawerVisible&&!textEditing;
-    bool SuppressDockActive => ShouldSuppressDockByKey(WakeSuppressedByKey,MenuOpen,Busy,InternalDragging,Drawer?.IsVisible==true,Native.ForegroundTextEditing());
+    volatile bool wakeDisabled;
+    internal bool WakeSuppressedByKey => wakeDisabled;
+    internal static bool ShouldSuppressDockByKey(bool wakeSuppressedByKey,bool menuOpen,bool busy,bool internalDragging,bool drawerVisible)=>
+        wakeSuppressedByKey&&!menuOpen&&!busy&&!internalDragging&&!drawerVisible;
+    bool SuppressDockActive => ShouldSuppressDockByKey(WakeSuppressedByKey,MenuOpen,Busy,InternalDragging,Drawer?.IsVisible==true);
     internal bool DesktopResident => !AutoHideDock&&!displayUnavailable&&!Native.Fullscreen(Screen)&&!Native.HasMaximizedWindow(Screen);
     bool menuOpen,internalDragging,busy,desktopDirty,mirrorVisualDirty,internalDropInProgress;
     long suppressAutoHideUntilTick;
@@ -278,7 +283,13 @@ internal sealed class Controller : IDisposable
     {
         if(disposed)return;
         UpdateModalRegions();
-        if(menuOpen||busy||internalDragging||DrawerInteractionActive) { Dock?.ObservePointer(default,false);return; }
+        if(menuOpen||busy||internalDragging||DrawerInteractionActive)
+        {
+            Dock?.ObservePointer(default,false);
+            Drawer?.DismissTileTip();
+            if(menuOpen)Dock?.ClearDoubleClickState();
+            return;
+        }
         if(desktopDirty){syncDebounce.Stop();syncDebounce.Start();}
         QueueDockLeaveCheck();
     }
@@ -304,7 +315,7 @@ internal sealed class Controller : IDisposable
     readonly System.Drawing.Icon trayIcon;
     readonly Intent intent=new();
     readonly uint taskbarCreated=Native.RegisterWindowMessage("TaskbarCreated");
-    readonly DispatcherTimer wake=new(),leave=new(),refresh=new(),syncDebounce=new(),safetySync=new(),suppressPoll=new();
+    readonly DispatcherTimer wake=new(),leave=new(),refresh=new(),syncDebounce=new(),safetySync=new();
     readonly DispatcherTimer iconRefreshDebounce=new(){Interval=TimeSpan.FromMilliseconds(80)};
     readonly DispatcherTimer iconGlobalDebounce=new(){Interval=TimeSpan.FromMilliseconds(250)};
     readonly DispatcherTimer iconReconcileTimer=new(){Interval=TimeSpan.FromSeconds(15)};
@@ -312,7 +323,6 @@ internal sealed class Controller : IDisposable
     int iconReconcileTickCount;
     internal int IconCacheHits {get;private set;}
     internal int IconLoads {get;private set;}
-    bool keySuppressingDock;
     readonly DispatcherTimer displayRetry=new(){Interval=TimeSpan.FromMilliseconds(350)};
     bool displayUnavailable;
     int displayRetries;
@@ -468,8 +478,7 @@ internal sealed class Controller : IDisposable
             ReconcileIcons();
         };
         iconReconcileTimer.Start();
-        suppressPoll.Interval=TimeSpan.FromMilliseconds(40);suppressPoll.Tick+=(_,_)=>PollSuppressWakeKey();
-        if(SuppressWakeKey>0)suppressPoll.Start();
+        wakeDisabled=SuppressWakeKey>0&&Store.Data.WakeDisabled;
         externalDragEscape.Tick+=(_,_)=>
         {
             if(!ExternalFileDragActive){externalDragEscape.Stop();return;}
@@ -480,7 +489,7 @@ internal sealed class Controller : IDisposable
         };
         displayRetry.Tick+=(_,_)=>{displayRetry.Stop();RefreshDisplay();};
         modal=new ModalInputGate(()=>System.Windows.Application.Current.Dispatcher.BeginInvoke(()=>{if(!AutoHideBlocked&&!Busy&&!InternalDragging)CloseDrawer(collapseDock:true);}),(int)Native.GetDoubleClickTime(),Native.DoubleClickWidth,Native.DoubleClickHeight,()=>System.Windows.Application.Current.Dispatcher.BeginInvoke(()=>{if(AutoHideBlocked||Busy||InternalDragging)return;drawerLostForeground=true;CloseDrawer(collapseDock:true);UpdateModalRegions();}));
-        hook=new PointerHook(OnPointerEvent,FilterPointer,SuppressWakeKey==Native.GraveWakeKey);
+        hook=new PointerHook(OnPointerEvent,FilterPointer,SuppressWakeKey,OnWakeKeyPressed);
         eventProc=(_,evt,h,obj,child,thread,time)=>
         {
             if(disposed)return;
@@ -637,12 +646,29 @@ internal sealed class Controller : IDisposable
     internal bool SetSuppressWakeKey(int vk)
     {
         vk=Math.Clamp(vk,0,254);
-        bool wasGrave=SuppressWakeKey==Native.GraveWakeKey;
-        if(!SaveSetting(()=>Store.Data.SuppressWakeKey,v=>Store.Data.SuppressWakeKey=v,vk))return false;
-        if(wasGrave!=(vk==Native.GraveWakeKey))ReinstallPointerHook();
-        if(WakeSuppressedByKey){wake.Stop();intent.Reset();}
-        if(vk>0)suppressPoll.Start();else{suppressPoll.Stop();if(keySuppressingDock){keySuppressingDock=false;CheckFullscreen();}}
+        var data=Store.Data;
+        if(!SaveSetting(()=>(data.SuppressWakeKey,data.WakeDisabled),
+            value=>(data.SuppressWakeKey,data.WakeDisabled)=value,(vk,vk!=0&&data.WakeDisabled)))return false;
+        hook?.SetWakeKey(vk);
+        ApplyWakeMode();
         return true;
+    }
+
+    void OnWakeKeyPressed(int key)
+    {
+        var dispatcher=System.Windows.Application.Current?.Dispatcher;
+        dispatcher?.BeginInvoke(DispatcherPriority.Input,()=>{
+            if(disposed||key!=SuppressWakeKey||Busy||Drawer?.TextInputActive==true||Native.ForegroundTextEditing())return;
+            if(SaveSetting(()=>Store.Data.WakeDisabled,value=>Store.Data.WakeDisabled=value,!wakeDisabled))
+                ApplyWakeMode();
+        });
+    }
+
+    void ApplyWakeMode()
+    {
+        wakeDisabled=Store.Data.WakeDisabled;
+        wake.Stop();intent.Reset();
+        CheckFullscreen();
     }
 
     internal bool SetLayoutPreference((int Capacity,int Rows,int Columns) value)
@@ -833,7 +859,7 @@ internal sealed class Controller : IDisposable
         foreach(var key in keys)RequestIcon(key.Path,key.Px);
     }
 
-    void ReinstallPointerHook() { try { hook?.Dispose();hook=new PointerHook(OnPointerEvent,FilterPointer,SuppressWakeKey==Native.GraveWakeKey); } catch(Exception e) { Program.Log(e); } }
+    void ReinstallPointerHook() { try { hook?.Dispose();hook=new PointerHook(OnPointerEvent,FilterPointer,SuppressWakeKey,OnWakeKeyPressed); } catch(Exception e) { Program.Log(e); } }
     internal void TestReinstallHook()=>ReinstallPointerHook();
 
     // ---------------------------------------------------------------- placement
@@ -1201,22 +1227,6 @@ internal sealed class Controller : IDisposable
     void RenderDockPose(double phase){Dock.SetRevealAndOpacity(phase,Math.Clamp(phase*1.4,0,1));RenderIndicator(phase);DockAnimationFrame?.Invoke(phase,dockMotion?.Velocity??0);}
     void CompleteDockMotion(bool open){dockToken=0;dockHiding=false;if(open){MoveDock(dockRect.Top);Dock.SetRevealAndOpacity(1,1);}else{Dock.Hide();dockShowing=false;Dock.SetRevealAndOpacity(1,1);dockY=dockRect.Top;CheckFullscreen();}EndAnimationBoost();}
     internal void SettleDockMotion(){if(!Dock.IsVisible)return;dockMotion.Snap(1);dockToken=0;dockHiding=false;MoveDock(dockRect.Top);EndAnimationBoost();}
-    void PollSuppressWakeKey()
-    {
-        if(disposed)return;
-        bool active=SuppressDockActive;
-        if(active)
-        {
-            keySuppressingDock=true;
-            wake.Stop();intent.Reset();
-            if(Dock.IsVisible&&!dockHiding)HideDockAnimated();
-        }
-        else if(keySuppressingDock)
-        {
-            keySuppressingDock=false;
-            CheckFullscreen();
-        }
-    }
     public void Collapse()
     {
         if((DesktopResident&&!SuppressDockActive)||MenuOpen||Busy||InternalDragging||AutoHideBlocked||Drawer?.IsVisible==true)return;
@@ -1232,7 +1242,7 @@ internal sealed class Controller : IDisposable
     }
     void RenderIndicator(double phase)
     {
-        if(indicatorSuppressed){if(indicator.IsVisible)indicator.Hide();return;}
+        if(indicatorSuppressed||WakeSuppressedByKey){if(indicator.IsVisible)indicator.Hide();return;}
         var p=WakeStrip.Pose(phase);
         if(indicator.Content is Border line){line.Width=86*Layout.DensityUnit*p.Length;line.Height=4.5*Layout.DensityUnit*p.Height;}
         indicator.Opacity=p.Alpha;
@@ -1250,7 +1260,7 @@ internal sealed class Controller : IDisposable
             EndAnimationBoost();
             return;
         }
-        if(DesktopResident&&!SuppressDockActive)
+        if(DesktopResident&&!WakeSuppressedByKey)
         {
             if(!Dock.IsVisible||dockHiding)ShowDockAnimated();
         }
@@ -1454,7 +1464,7 @@ internal sealed class Controller : IDisposable
             else if(!dockClick||!target.EndsWith(".exe",StringComparison.OrdinalIgnoreCase)||
                     launchPendingTarget!=target||Environment.TickCount64>=launchPendingUntil)
             {
-                Shell.Launch(e);
+                Dock.TrackLaunch(e,Shell.Launch(e));
                 if(dockClick){launchPendingTarget=target;launchPendingUntil=Environment.TickCount64+1000;}
             }
         });
@@ -1623,7 +1633,7 @@ internal sealed class Controller : IDisposable
         finally { SetExternalFileDrag(false); }
     }
 
-    static string? ResolveDirectoryTarget(Entry target)
+    internal static string? ResolveDirectoryTarget(Entry target)
     {
         if (target.IsVirtual) return null;
         if (Directory.Exists(target.Path)) return target.Path;
@@ -1638,66 +1648,29 @@ internal sealed class Controller : IDisposable
     internal bool DropEntriesToTarget(Entry target, IReadOnlyList<Entry> sources, bool copy)
     {
         var paths = RealPaths(sources).Where(p => !string.Equals(p, target.Path, StringComparison.OrdinalIgnoreCase)).ToArray();
-        if (paths.Length == 0) return false;
-        var destDir = ResolveDirectoryTarget(target);
-        bool exec = destDir == null && ShellDrop.IsExecutableTarget(target.Path);
-        if (destDir != null || !exec) BeginInternalDropProtection();
+        var destination = ResolveDirectoryTarget(target);
+        if (paths.Length == 0 || destination == null) return false;
         Busy = true;
         try
         {
-            if (destDir != null)
+            bool ok = copy
+                ? ShellOps.Copy(paths, destination, DialogOwner, quiet: skipDesktop)
+                : ShellOps.Move(paths, destination, DialogOwner, quiet: skipDesktop);
+            if (!ok)
             {
-                bool ok = copy
-                    ? ShellOps.Copy(paths, destDir, DialogOwner, quiet: skipDesktop)
-                    : ShellOps.Move(paths, destDir, DialogOwner, quiet: skipDesktop);
-                if (!ok)
-                {
-                    Notify("拖放未完成或已取消。", false);
-                    return false;
-                }
-                if (!copy)
-                {
-                    var moved = new HashSet<string>(paths, StringComparer.OrdinalIgnoreCase);
-                    Store.Data.Entries.RemoveAll(x => !x.IsVirtual && moved.Contains(x.Path) && !File.Exists(x.Path) && !Directory.Exists(x.Path));
-                    Store.Save();
-                }
-                SyncDesktopNow();
-                Dock.Rebuild();
-                Drawer?.Render();
-                Drawer?.ClearSelection();
-                return true;
-            }
-
-            Native.GetCursorPos(out var pt);
-            string dest = target.IsVirtual ? target.ShellVerb ?? "" : target.Path;
-            using var drop = new ShellDrop(dest, paths);
-            uint keys = exec ? 0u : (copy ? 8u : 4u);
-            uint allowed = exec ? 1u : 3u;
-            uint enterEffect = drop.Enter(keys, pt, allowed);
-            uint effect = enterEffect != 0 ? drop.Drop(keys, pt, allowed) : 0u;
-            if (effect == 0)
-            {
-                Notify("此目标未接受文件。");
+                Notify("拖放未完成或已取消。", false);
                 return false;
             }
-            if (!exec)
+            if (!copy)
             {
-                if (!copy)
-                {
-                    var moved = new HashSet<string>(paths, StringComparer.OrdinalIgnoreCase);
-                    Store.Data.Entries.RemoveAll(x => !x.IsVirtual && moved.Contains(x.Path) && !File.Exists(x.Path) && !Directory.Exists(x.Path));
-                    Store.Save();
-                }
-                SyncDesktopNow();
-                Dock.Rebuild();
-                Drawer?.Render();
-                Drawer?.ClearSelection();
+                var moved = new HashSet<string>(paths, StringComparer.OrdinalIgnoreCase);
+                Store.Data.Entries.RemoveAll(x => !x.IsVirtual && moved.Contains(x.Path) && !File.Exists(x.Path) && !Directory.Exists(x.Path));
+                Store.Save();
             }
-            else
-            {
-                EndInternalDropProtection(restoreDrawerFocus: false);
-                CloseDrawer(force:true);
-            }
+            SyncDesktopNow();
+            Dock.Rebuild();
+            Drawer?.Render();
+            Drawer?.ClearSelection();
             return true;
         }
         catch (Exception ex)
@@ -1706,17 +1679,13 @@ internal sealed class Controller : IDisposable
             Notify("拖放未完成：" + ex.Message);
             return false;
         }
-        finally
-        {
-            if (!exec) EndInternalDropProtection(restoreDrawerFocus: true);
-            Busy = false;
-        }
+        finally { Busy = false; }
     }
 
     internal void OpenEntries(IReadOnlyList<Entry> entries)
     {
         if(entries.Count==0) return;
-        Safe(()=> { foreach(var e in entries) Shell.Launch(e); CloseDrawer(force:true); });
+        Safe(()=> { foreach(var e in entries) Dock.TrackLaunch(e,Shell.Launch(e)); CloseDrawer(force:true); });
     }
     internal void OpenWithEntry(Entry e) => Safe(()=> { if(!ShellOps.OpenWith(e.Path)) Notify("没有可用于打开方式的项目。"); });
     internal void RevealEntry(Entry e) => Safe(()=>
@@ -2369,7 +2338,7 @@ internal sealed class Controller : IDisposable
     {
         void Trace(string value){if(Environment.GetEnvironmentVariable("MACDOCK_TEST_RESULTS") is string folder)File.AppendAllText(Path.Combine(folder,"dispose-stages.txt"),value+Environment.NewLine);}
         Trace("begin");
-        if(disposed)return;disposed=true;Native.RestoreSystemCursors(force:true);updateCheck.Stop();updateLifetime.Cancel();updateLifetime.Dispose();dockMotion.Cancel();drawerMotion.Cancel();EndAnimationBoost(force:true);PointerSort.Active?.End(false);if(trayMenu!=null)trayMenu.IsOpen=false;wake.Stop();leave.Stop();refresh.Stop();syncDebounce.Stop();safetySync.Stop();displayRetry.Stop();suppressPoll.Stop();iconRefreshDebounce.Stop();iconGlobalDebounce.Stop();iconReconcileTimer.Stop();foreach(var t in iconRetryTimers.ToArray())t.Stop();iconRetryTimers.Clear();
+        if(disposed)return;disposed=true;Native.RestoreSystemCursors(force:true);updateCheck.Stop();updateLifetime.Cancel();updateLifetime.Dispose();dockMotion.Cancel();drawerMotion.Cancel();EndAnimationBoost(force:true);PointerSort.Active?.End(false);if(trayMenu!=null)trayMenu.IsOpen=false;wake.Stop();leave.Stop();refresh.Stop();syncDebounce.Stop();safetySync.Stop();displayRetry.Stop();iconRefreshDebounce.Stop();iconGlobalDebounce.Stop();iconReconcileTimer.Stop();foreach(var t in iconRetryTimers.ToArray())t.Stop();iconRetryTimers.Clear();
         foreach(var w in watchers) { try { w.EnableRaisingEvents=false;w.Dispose(); } catch { } }
         SystemEvents.DisplaySettingsChanged-=DisplayChanged;SystemEvents.UserPreferenceChanged-=PreferenceChanged;SystemEvents.PowerModeChanged-=PowerChanged;
         hook?.Dispose();shellChanges?.Dispose();foreach(var h in eventHooks)Native.UnhookWinEvent(h);

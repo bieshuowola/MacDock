@@ -637,9 +637,7 @@ internal static partial class Native
         if (!path.EndsWith(".exe",StringComparison.OrdinalIgnoreCase)) return list;
         EnumWindows((h,_) =>
         {
-            if (!IsWindowVisible(h) || (GetWindowLongPtr(h,-20).ToInt64() & 0x80)!=0) return true;
-            if (DwmGetWindowAttribute(h,14,out int cloaked,4)==0 && cloaked!=0) return true;
-            if (Class(h) is "Progman" or "WorkerW" or "Shell_TrayWnd" or "Shell_SecondaryTrayWnd") return true;
+            if(!IsApplicationWindow(h))return true;
             var t=new StringBuilder(512);GetWindowText(h,t,512); if(t.Length==0) return true;
             GetWindowThreadProcessId(h,out var pid);
             try { using var p=Process.GetProcessById((int)pid); if(string.Equals(p.MainModule?.FileName,path,StringComparison.OrdinalIgnoreCase)) list.Add((h,t.ToString())); } catch { }
@@ -647,6 +645,21 @@ internal static partial class Native
         },0);
         return list;
     }
+    static bool IsApplicationWindow(nint window) =>
+        IsWindowVisible(window)&&(GetWindowLongPtr(window,-20).ToInt64()&0x80)==0&&
+        (DwmGetWindowAttribute(window,14,out int cloaked,4)!=0||cloaked==0)&&
+        Class(window) is not ("Progman" or "WorkerW" or "Shell_TrayWnd" or "Shell_SecondaryTrayWnd");
+
+    internal static HashSet<uint> ApplicationWindowProcessIds()
+    {
+        var ids=new HashSet<uint>();
+        EnumWindows((window,_)=>{
+            if(IsApplicationWindow(window)){GetWindowThreadProcessId(window,out uint pid);ids.Add(pid);}
+            return true;
+        },0);
+        return ids;
+    }
+
     public static bool Fullscreen(System.Windows.Forms.Screen screen)
     {
         var h=GetForegroundWindow(); if(h==0 || Class(h) is "Progman" or "WorkerW" or "Shell_TrayWnd" or "Shell_SecondaryTrayWnd") return false;
@@ -1069,9 +1082,6 @@ internal static class Shell
         if(!path.EndsWith(".lnk",StringComparison.OrdinalIgnoreCase)) return path;
         var target=IconResources.ReadLink(path).Target;return string.IsNullOrWhiteSpace(target)?path:target;
     }
-    public static void Launch(Entry e)
-    {
-        if(e.IsVirtual) { Process.Start(new ProcessStartInfo(e.ShellVerb ?? "explorer.exe") { UseShellExecute=true }); return; }
-        Process.Start(new ProcessStartInfo(e.Path) { UseShellExecute=true });
-    }
+    public static Process? Launch(Entry e) =>
+        Process.Start(new ProcessStartInfo(e.IsVirtual?e.ShellVerb??"explorer.exe":e.Path){UseShellExecute=true});
 }

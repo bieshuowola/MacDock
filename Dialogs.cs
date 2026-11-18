@@ -121,8 +121,8 @@ internal static class Dialogs
             RefreshSuppressButtons();
         };
         var openModeRow=Row("抽屉图标打开方式",openMode);
-        var suppressRow=Row("按住屏蔽 Dock 唤出按键",suppressPanel);
-        System.Windows.Automation.AutomationProperties.SetName(bindKey,"按住屏蔽 Dock 唤出按键");
+        var suppressRow=Row("按键切换 Dock 唤出",suppressPanel);
+        System.Windows.Automation.AutomationProperties.SetName(bindKey,"按键切换 Dock 唤出");
         System.Windows.Automation.AutomationProperties.SetName(clearKey,"清除屏蔽唤醒按键");
         Group("常规",Row("开机自启动",startup),Row("减少动画效果",motion),openModeRow,suppressRow);
 

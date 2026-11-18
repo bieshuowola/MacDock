@@ -84,7 +84,7 @@ internal static class SettingsReleaseChecks
                     Check("open mode double-click persists immediately",new Store(Path.GetDirectoryName(c.Store.FilePath)).Data.DoubleClickToOpen);
                     openMode.SelectedIndex=0;
                     Check("open mode single-click restores immediately",!new Store(Path.GetDirectoryName(c.Store.FilePath)).Data.DoubleClickToOpen);
-                    var bindKey=Named<Button>("按住屏蔽 Dock 唤出按键");
+                    var bindKey=Named<Button>("按键切换 Dock 唤出");
                     var clearKey=Named<Button>("清除屏蔽唤醒按键");
                     Check("suppress wake key starts unbound",!clearKey.IsEnabled&&c.Store.Data.SuppressWakeKey==0);
                     Press(bindKey);

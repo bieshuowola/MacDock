@@ -1047,7 +1047,6 @@ internal static class ExperienceChecks
                                 }
                             }
                             bmp.Save(Path.Combine(Output,"drawer-stability-open-mid.png"),System.Drawing.Imaging.ImageFormat.Png);
-                            try{bmp.Save(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory),"verify-bottom-edge.png"),System.Drawing.Imaging.ImageFormat.Png);}catch{}
                             int cx=capW/2+150;
                             if(Native.GetWindowRect(c.Dock.Handle,out var dockR))
                                 cx=Math.Clamp(dockR.Right+36-capX,10,capW-10);

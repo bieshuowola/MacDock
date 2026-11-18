@@ -44,8 +44,8 @@ internal static class TransitionChecks
             gate.Current=area with{Suspended=true};Check("file dialog or Shell menu suspends modality",!gate.Filter(p,0x201,now:1300));
             gate.Current=area;Check("X button dismissal preserves the pair",gate.Filter(p,0x20B,0x10000,2000)&&gate.Filter(p,0x20C,0x10000,2010));
             var spring=Enumerable.Range(0,1001).Select(n=>Anim.DrawerSpring(n/1000.0)).ToArray();Check("spring starts and ends exactly at stable geometry",spring[0]==0&&spring[^1]==1);Check("spring overshoot is subtle and bounded",spring.Max()>1&&spring.Max()<1.06&&spring.Min()>=0,$"peak={spring.Max():F5}");
-            Check("suppress wake key active on clean desktop",Controller.ShouldSuppressDockByKey(true,false,false,false,false,false));
-            Check("suppress wake key respects dialogs, menus, drawer and text rename",!Controller.ShouldSuppressDockByKey(false,false,false,false,false,false)&&!Controller.ShouldSuppressDockByKey(true,true,false,false,false,false)&&!Controller.ShouldSuppressDockByKey(true,false,true,false,false,false)&&!Controller.ShouldSuppressDockByKey(true,false,false,true,false,false)&&!Controller.ShouldSuppressDockByKey(true,false,false,false,true,false)&&!Controller.ShouldSuppressDockByKey(true,false,false,false,false,true));
+            Check("suppress wake key active on clean desktop",Controller.ShouldSuppressDockByKey(true,false,false,false,false));
+            Check("wake suppression respects dialogs, menus, drag and drawer",!Controller.ShouldSuppressDockByKey(false,false,false,false,false)&&!Controller.ShouldSuppressDockByKey(true,true,false,false,false)&&!Controller.ShouldSuppressDockByKey(true,false,true,false,false)&&!Controller.ShouldSuppressDockByKey(true,false,false,true,false)&&!Controller.ShouldSuppressDockByKey(true,false,false,false,true));
             Check("Oem3 key label displays tilde",Native.KeyName(0xC0)=="~");
             return 0;
         }

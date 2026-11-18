@@ -1,4 +1,5 @@
 #if MACDOCK_EXPERIENCE_CHECKS
+using System.Diagnostics;
 using System.IO;
 using System.Runtime.InteropServices;
 using System.Text.Json;
@@ -19,6 +20,94 @@ internal static class FieldInteractionChecks
         if(root is T item)yield return item;
         for(int i=0;i<VisualTreeHelper.GetChildrenCount(root);i++)
             foreach(var child in Elements<T>(VisualTreeHelper.GetChild(root,i)))yield return child;
+    }
+
+    static Process StartFixture(string image,params string[] args)
+    {
+        var launch=new ProcessStartInfo(image);
+        launch.ArgumentList.Add("--maintenance-fixture");
+        foreach(var arg in args)launch.ArgumentList.Add(arg);
+        return Process.Start(launch)??throw new InvalidOperationException("Fixture failed to start");
+    }
+
+    internal static int Fixture(string[] args)
+    {
+        if(args[1]=="background")
+        {
+            Thread.Sleep(TimeSpan.FromMinutes(2));
+            return 0;
+        }
+        if(args[1]=="launch-child")
+        {
+            using var child=StartFixture(args[2],"visible");
+            File.WriteAllText(args[3],child.Id.ToString());
+            return 0;
+        }
+        var app=new System.Windows.Application();
+        return app.Run(new Window{Title="MacDock child-process fixture",Width=240,Height=130,Left=20,Top=50});
+    }
+
+    static async Task CheckRunningDots(Controller c,string output,Action<string,bool,object?> check,Func<Func<bool>,Task> until)
+    {
+        string executable=Path.Combine(AppContext.BaseDirectory,"MacDock.StatusFixture.exe");
+        string childExecutable=Path.Combine(AppContext.BaseDirectory,"MacDock.StatusChild.exe");
+        foreach(var path in new[]{executable,childExecutable})File.Copy(Environment.ProcessPath!,path,true);
+        string shortcut=Path.Combine(output,"status-alpha.lnk");
+        var shell=Activator.CreateInstance(Type.GetTypeFromProgID("WScript.Shell")!)!;
+        object link=((dynamic)shell).CreateShortcut(shortcut);
+        try
+        {
+            ((dynamic)link).TargetPath=executable;
+            ((dynamic)link).Arguments="--maintenance-fixture background alpha";
+            ((dynamic)link).Save();
+        }
+        finally{Marshal.ReleaseComObject(link);Marshal.ReleaseComObject(shell);}
+
+        var target=new Entry{Path=executable,Name="Direct fixture",Pinned=true};
+        var alias=new Entry{Path=shortcut,Name="Argument fixture",Pinned=true};
+        var decoy=new Entry{Path=Path.Combine(output,"other",Path.GetFileName(executable)),Name="Different path",Pinned=true};
+        c.Store.Data.Entries.Clear();c.Store.Data.DockOrder.Clear();
+        c.Store.Data.Entries.AddRange(new[]{target,alias,decoy});
+        c.Dock.Rebuild();c.Position();c.Expand();c.SettleDockMotion();
+        var dock=c.Dock.TileCenter(target.Id);
+        Native.MovePointer(dock.X,dock.Y);
+        bool Direct()=>c.Dock.DotVisible(target.Id);
+        bool Alias()=>c.Dock.DotVisible(alias.Id);
+        using var beta=StartFixture(executable,"background","beta");
+        using var alpha=StartFixture(executable,"background","alpha");
+        try
+        {
+            await until(()=>Direct()&&Alias());
+            check("background executables and shortcuts with exact arguments show their dots",Direct()&&Alias(),null);
+            check("same executable name at a different path never matches",!c.Dock.DotVisible(decoy.Id),null);
+            alpha.Kill();await alpha.WaitForExitAsync();
+            await until(()=>!Alias());
+            check("a second instance keeps only its matching dot",Direct()&&!Alias(),null);
+            beta.Kill();await beta.WaitForExitAsync();
+            await until(()=>!Direct());
+            check("final process exit clears the dot without a window event",!Direct(),null);
+        }
+        finally
+        {
+            foreach(var process in new[]{alpha,beta})if(!process.HasExited)process.Kill();
+        }
+        string childPid=Path.Combine(output,"running-dots-child.pid");
+        var launcher=StartFixture(executable,"launch-child",childExecutable,childPid);
+        using var launcherExit=Process.GetProcessById(launcher.Id);
+        c.Dock.TrackLaunch(target,launcher);
+        await launcherExit.WaitForExitAsync();
+        using var child=Process.GetProcessById(int.Parse(File.ReadAllText(childPid)));
+        try
+        {
+            await until(()=>Native.Windows(childExecutable).Count==1&&Direct());
+            await Task.Delay(850);
+            check("same-application child keeps the dot after its launcher exits",Direct()&&launcherExit.HasExited,null);
+            child.CloseMainWindow();
+            await child.WaitForExitAsync();
+            await until(()=>!Direct());
+            check("child process exit clears the launcher dot",!Direct(),null);
+        }
+        finally{if(!child.HasExited)child.Kill();}
     }
 
     internal static async Task Run(Controller c)
@@ -137,13 +226,14 @@ internal static class FieldInteractionChecks
             var desktop=Path.Combine(output,"desktop");
             Directory.CreateDirectory(desktop);
             c.OverrideDesktopFolder=desktop;
+            if(!shadowOnly)await CheckRunningDots(c,output,Check,Until);
             c.Store.Data.Entries.Clear();c.Store.Data.DockOrder.Clear();
             c.Store.Data.DoubleClickToOpen=true;
             if(shadowOnly){c.Store.Data.ReducedMotion=false;c.Store.Data.Appearance="light";Theme.Apply("light");}
             c.Store.Data.Mode="自定义";
             var entries=Enumerable.Range(1,2).Select(i=>
             {
-                var path=Path.Combine(desktop,$"field-test-{i}.cmd");
+                var path=Path.Combine(desktop,i==1?"field-test-1.cmd":$"field-test-{i}-a-long-file-name-used-to-verify-complete-hover-labels.cmd");
                 File.WriteAllText(path,"@exit /b 0\r\n");
                 return new Entry{Path=path,Name=$"Field test {i}",Source="desktop",Pinned=true};
             }).ToArray();
@@ -195,7 +285,7 @@ internal static class FieldInteractionChecks
             Check("Drawer double-click launches once and clears selection",c.LaunchCount==launched+2&&drawer.SelectedCount==0);
             await OpenDrawer();
             Key(0x24);await Task.Delay(120);
-            Check("Drawer keyboard navigation has a visible focus",drawerTiles.Any(t=>!Borderless(t)&&Shadow(t)==1),
+            Check("Drawer keyboard navigation keeps selection shadow with no focus frame",drawerTiles.All(Borderless)&&drawerTiles.Any(t=>Shadow(t)==1),
                 new{drawer.SelectedCount,focus=System.Windows.Input.Keyboard.FocusedElement?.GetType().Name});
             Key(0x75);await Task.Delay(120);
             Check("F6 transfers navigation to Dock",c.Dock.KeyboardActive);
@@ -213,6 +303,62 @@ internal static class FieldInteractionChecks
                 Check("Dock single-click mode starts once",c.LaunchCount==singleLaunches+2);
                 return;
             }
+            await Move(drawerBlank);
+            var source=drawer.TileCenter(entries[0].Id);
+            var target=drawer.TileCenter(entries[1].Id);
+            Native.MovePointer(target.X,target.Y);
+            await Task.Delay(650);
+            Check("Drawer tooltip waits before opening",drawer.VisibleTileTip==null);
+            await Until(()=>drawer.VisibleTileTip!=null);
+            Check("Drawer tooltip shows the full file name",drawer.VisibleTileTip==Path.GetFileName(entries[1].Path),drawer.VisibleTileTip);
+            Check("Search spans two icon edges",drawer.SearchWidth>c.Layout.DrawerIcon*2&&drawer.SearchWidth<2*(c.Layout.DrawerTile+c.Layout.GapX),drawer.SearchWidth);
+            await Move(drawerBlank);
+            Check("Moving away closes the tooltip",drawer.VisibleTileTip==null);
+            int launchesBeforeDrag=c.LaunchCount;
+            await Move(source);
+            await Until(()=>drawer.VisibleTileTip!=null);
+            Native.TestButton(true);await Task.Delay(45);
+            await Move(target);
+            Check("Dragging to an application has no open-with target, tip or frame",
+                PointerSort.Active!=null&&c.InternalDragging&&drawer.DropTargetEntry==null&&drawer.VisibleTileTip==null&&drawerTiles.All(Borderless));
+            Native.TestButton(false);await Task.Delay(170);
+            await Click(drawerBlank);
+            Check("Tile drop and subsequent blank click cannot open any application or menu",
+                c.LaunchCount==launchesBeforeDrag&&drawer.IsVisible&&!c.MenuOpen&&!c.InternalDragging&&PointerSort.Active==null&&drawer.SelectedCount==0);
+            source=drawer.TileCenter(entries[0].Id);
+            target=drawer.TileCenter(entries[1].Id);
+            await Move(source);
+            Native.TestKey(0x10,true);
+            try
+            {
+                Native.TestButton(true);await Task.Delay(45);
+                await Move(target);
+                Native.TestButton(false);await Task.Delay(220);
+            }
+            finally{Native.TestButton(false);Native.TestKey(0x10,false);}
+            await Click(drawerBlank);
+            Check("Modifier OLE drop on an application cannot start the application or shell chooser",
+                c.LaunchCount==launchesBeforeDrag&&drawer.IsVisible&&!c.MenuOpen&&!c.InternalDragging&&PointerSort.Active==null);
+
+            var payload=Path.Combine(desktop,"payload.txt");
+            var folderPath=Path.Combine(desktop,"Folder target");
+            var destination=Path.Combine(folderPath,"payload.txt");
+            File.WriteAllText(payload,"real test file");
+            Directory.CreateDirectory(folderPath);
+            c.Store.Add(payload,false,source:"desktop");c.Store.Add(folderPath,false,source:"desktop");
+            c.Changed();await Task.Delay(220);
+            var fileEntry=c.Store.Data.Entries.Single(e=>e.Path==payload);
+            var folderEntry=c.Store.Data.Entries.Single(e=>e.Path==folderPath);
+            await Move(drawer.TileCenter(fileEntry.Id));
+            Native.TestButton(true);await Task.Delay(45);
+            await Move(drawer.TileCenter(folderEntry.Id));
+            await Until(()=>drawer.DropTargetEntry?.Id==folderEntry.Id);
+            Native.TestButton(false);
+            await Until(()=>File.Exists(destination)&&!c.InternalDragging);
+            Check("A legal file-to-folder drop still moves the real file without launching",
+                !File.Exists(payload)&&File.ReadAllText(destination)=="real test file"&&c.LaunchCount==launchesBeforeDrag);
+            await Until(()=>!c.InternalDropProtected&&!c.DrawerInteractionActive);
+
             c.CloseDrawer(force:true);await Until(()=>!drawer.IsVisible);
             await Move(outside);c.Collapse();await Until(()=>!c.Dock.IsVisible);
 
@@ -228,9 +374,14 @@ internal static class FieldInteractionChecks
                     c.WakeSuppressedByKey&&!Native.KeyHeld(Native.GraveWakeKey)&&!c.Dock.IsVisible);
             }
             finally{Grave(false);}
+            await Move(outside);await Move(wakePoint);await Task.Delay(350);
+            Check("Release leaves wake disabled and persists the configured binding",
+                c.WakeSuppressedByKey&&!c.Dock.IsVisible&&new Store(Path.GetDirectoryName(c.Store.FilePath)).Data is
+                    {WakeDisabled:true,SuppressWakeKey:Native.GraveWakeKey});
+            Grave(true);Grave(false);
             await Until(()=>!c.WakeSuppressedByKey);
             await Move(outside);await Move(wakePoint);await Until(()=>c.Dock.IsVisible);
-            Check("Grave release restores wake",!c.WakeSuppressedByKey);
+            Check("A second press restores wake",!c.WakeSuppressedByKey);
             await OpenDrawer();
             Native.TestKey(0x11,true);Key(0x46);Native.TestKey(0x11,false);
             await Until(()=>drawer.TextInputActive);
@@ -243,10 +394,12 @@ internal static class FieldInteractionChecks
             Grave(true);await Task.Delay(100);
             bool delivered=Native.KeyHeld(Native.GraveWakeKey);
             Grave(false);
-            Check("Bound grave still reaches the drawer search field",delivered&&drawer.TextInputActive&&
-                textKeys.Contains("Oem3"),new{delivered,textKeys});
+            Check("Bound grave still reaches the drawer search field without toggling",delivered&&drawer.TextInputActive&&
+                textKeys.Contains("Oem3")&&!c.WakeSuppressedByKey,new{delivered,textKeys});
             c.CloseDrawer(force:true);await Until(()=>!drawer.IsVisible);
             await Move(outside);c.Collapse();await Until(()=>!c.Dock.IsVisible);
+
+            if(Environment.GetEnvironmentVariable("MACDOCK_MAINTENANCE_ONLY")=="1")return;
 
             var bar=FindWindow("Shell_TrayWnd",null);
             var taskbar=AutomationElement.FromHandle(bar);
@@ -332,6 +485,7 @@ internal static class FieldInteractionChecks
             if(shellPopupOpened)Key(0x1B);
             foreach(var fixture in thumbnailFixtures)fixture.Close();
             Native.TestKey(Native.GraveWakeKey,false,scan:0x29);
+            Native.TestKey(0x10,false);
             Native.TestButton(false);Native.TestRightButton(false);
             Native.SetCursorPos(original.X,original.Y);
             Native.SetForegroundWindow(foreground);
