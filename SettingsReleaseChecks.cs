@@ -78,7 +78,7 @@ internal static class SettingsReleaseChecks
                     var appearance=Named<ComboBox>("外观模式");
                     appearance.SelectedIndex=1;
                     Check("appearance persists immediately",new Store(Path.GetDirectoryName(c.Store.FilePath)).Data.Appearance=="light");
-                    var openMode=Named<ComboBox>("图标打开方式");
+                    var openMode=Named<ComboBox>("抽屉图标打开方式");
                     Check("open mode defaults to single click",openMode.SelectedIndex==0&&!c.Store.Data.DoubleClickToOpen);
                     openMode.SelectedIndex=1;
                     Check("open mode double-click persists immediately",new Store(Path.GetDirectoryName(c.Store.FilePath)).Data.DoubleClickToOpen);
@@ -103,7 +103,7 @@ internal static class SettingsReleaseChecks
                     using var key=ECDsa.Create(ECCurve.NamedCurves.nistP256);
                     var current=Version.Parse(ReleaseUpdates.CurrentVersion);
                     string next=new Version(current.Major,current.Minor,current.Build+1).ToString(3);
-                    byte[] manifest=JsonSerializer.SerializeToUtf8Bytes(new ReleaseUpdates.Manifest(next,$"MacDock-{next}-win-x64-Setup.exe",1,new string('a',64),"测试版更新说明"));
+                    byte[] manifest=JsonSerializer.SerializeToUtf8Bytes(new ReleaseUpdates.Manifest(next,$"MacDock-{next}-win-x64-Setup.exe",1,new string('a',64),"测试版更新说明",BuildSequence:long.MaxValue,BuildFingerprint:Guid.NewGuid().ToString("N"),PayloadSha256:new string('b',64)));
                     byte[] signature=key.SignData(manifest,HashAlgorithmName.SHA256,DSASignatureFormat.IeeeP1363FixedFieldConcatenation);
                     using var http=new HttpClient(new Feed(manifest,signature,next));
                     await c.CheckUpdates(false,new ReleaseUpdates("fixture/MacDock",key.ExportSubjectPublicKeyInfo(),http));

@@ -24,7 +24,8 @@ internal static class UpdateChecks
         var cache=Path.Combine(output,"update-fixtures-"+Guid.NewGuid().ToString("N"));
         using var key=ECDsa.Create(ECCurve.NamedCurves.nistP256);
         byte[] payload="MacDock test package; never executed"u8.ToArray();
-        byte[] manifest=JsonSerializer.SerializeToUtf8Bytes(new ReleaseUpdates.Manifest("1.9.1","MacDock-1.9.1-win-x64-Setup.exe",payload.Length,Convert.ToHexString(SHA256.HashData(payload)),"Fixture"));
+        const string fingerprint="c4d71686b4a64a3db2a530087fd161c8";
+        byte[] manifest=JsonSerializer.SerializeToUtf8Bytes(new ReleaseUpdates.Manifest("1.9.1","MacDock-1.9.1-win-x64-Setup.exe",payload.Length,Convert.ToHexString(SHA256.HashData(payload)),"Fixture",BuildSequence:20,BuildFingerprint:fingerprint,PayloadSha256:new string('a',64)));
         byte[] signature=key.SignData(manifest,HashAlgorithmName.SHA256,DSASignatureFormat.IeeeP1363FixedFieldConcatenation);
         HttpResponseMessage Bytes(byte[] data)=>new(HttpStatusCode.OK){Content=new ByteArrayContent(data)};
         var tag="v1.9.1";
@@ -52,36 +53,20 @@ internal static class UpdateChecks
             if(valid==null)throw new InvalidDataException("Test release was not returned.");
             var path=await updates.Download(valid,cache,CancellationToken.None);
             Check("verified installer is byte identical",File.ReadAllBytes(path).SequenceEqual(payload));
-            Check("same version does not update",await updates.Check(new Version(1,9,1),CancellationToken.None)==null);
-            var revUpdatedAt=DateTimeOffset.UtcNow;
-            var revSums=System.Text.Encoding.UTF8.GetBytes($"{Convert.ToHexString(SHA256.HashData(payload)).ToLowerInvariant()}  MacDock-1.9.1-win-x64-Setup.exe\n");
-            using var revHttp=new HttpClient(new Responses(uri=>
-            {
-                if(uri.IdnHost=="api.github.com")return Bytes(JsonSerializer.SerializeToUtf8Bytes(new{tag_name="v1.9.1",draft=false,prerelease=false,body="修订说明",assets=new[]{new{name="MacDock-1.9.1-win-x64-Setup.exe",size=(long)payload.Length,updated_at=revUpdatedAt},new{name="SHA256SUMS.txt",size=(long)revSums.Length,updated_at=revUpdatedAt}}}));
-                if(uri.AbsolutePath.EndsWith("SHA256SUMS.txt"))return Bytes(revSums);
-                return Bytes(payload);
-            }));
-            var revUpdates=new ReleaseUpdates("fixture/MacDock",key.ExportSubjectPublicKeyInfo(),revHttp){LocalBuildTimeUtc=revUpdatedAt.AddMinutes(-10)};
-            var rev=await revUpdates.Check(new Version(1,9,1),CancellationToken.None);
-            Check("same version newer revision detected",rev!=null&&rev.IsRevision&&rev.Version=="1.9.1");
-            var binDir=Path.Combine(output,"update-bin-"+Guid.NewGuid().ToString("N"));
-            Directory.CreateDirectory(binDir);
-            var binFixture=Path.Combine(binDir,"MacDock.dll");
-            File.WriteAllBytes(binFixture,"old-binary-bytes"u8.ToArray());
-            var newBinBytes="new-binary-bytes"u8.ToArray();
-            var binSums=System.Text.Encoding.UTF8.GetBytes($"{Convert.ToHexString(SHA256.HashData(payload)).ToLowerInvariant()}  MacDock-1.9.1-win-x64-Setup.exe\n{Convert.ToHexString(SHA256.HashData(newBinBytes)).ToLowerInvariant()}  MacDock.dll\n");
-            using var fastRevHttp=new HttpClient(new Responses(uri=>
-            {
-                if(uri.IdnHost=="api.github.com")return Bytes(JsonSerializer.SerializeToUtf8Bytes(new{tag_name="v1.9.1",draft=false,prerelease=false,body="短间隔覆盖修订",assets=new[]{new{name="MacDock-1.9.1-win-x64-Setup.exe",size=(long)payload.Length,updated_at=revUpdatedAt.AddSeconds(5)},new{name="SHA256SUMS.txt",size=(long)binSums.Length,updated_at=revUpdatedAt.AddSeconds(5)}}}));
-                if(uri.AbsolutePath.EndsWith("SHA256SUMS.txt"))return Bytes(binSums);
-                return Bytes(payload);
-            }));
-            var fastRevUpdates=new ReleaseUpdates("fixture/MacDock",key.ExportSubjectPublicKeyInfo(),fastRevHttp){LocalBuildTimeUtc=revUpdatedAt,LocalBinaryPath=binFixture};
-            var fastRev=await fastRevUpdates.Check(new Version(1,9,1),CancellationToken.None);
-            Check("same version short-interval revision detected via binary hash",fastRev!=null&&fastRev.IsRevision&&fastRev.Version=="1.9.1");
-            File.WriteAllBytes(binFixture,newBinBytes);
-            var sameRev=await fastRevUpdates.Check(new Version(1,9,1),CancellationToken.None);
-            Check("same version matching binary hash is ignored even if timestamp newer",sameRev==null);
+            var sameVersion=new Version(1,9,1);
+            ReleaseUpdates Installed(long sequence,string identity)=>new("fixture/MacDock",key.ExportSubjectPublicKeyInfo(),http)
+                {LocalBuildSequence=sequence,LocalBuildFingerprint=identity};
+            var revised=Installed(19,Guid.NewGuid().ToString("N"));
+            Check("same version newer signed build", (await revised.Check(sameVersion,CancellationToken.None))?.IsRevision==true);
+            var current=Installed(20,fingerprint);
+            Check("installed revision is ignored",await current.Check(sameVersion,CancellationToken.None)==null);
+            Check("repeated installed revision check is quiet",await current.Check(sameVersion,CancellationToken.None)==null);
+            var newer=Installed(21,Guid.NewGuid().ToString("N"));
+            Check("different hash cannot roll back newer build",await newer.Check(sameVersion,CancellationToken.None)==null);
+            Check("higher version with older build sequence cannot update",await newer.Check(old,CancellationToken.None)==null);
+            Check("lower version cannot update",await updates.Check(new Version(1,9,2),CancellationToken.None)==null);
+            Check("equal sequence with a conflicting fingerprint is rejected",await Rejected(()=>Installed(20,Guid.NewGuid().ToString("N")).Check(sameVersion,CancellationToken.None)));
+            Check("unverified copy cannot be downloaded",await Rejected(()=>updates.Download(valid with { Notes="unverified" },cache,CancellationToken.None)));
             prerelease=true;
             Check("prerelease ignored",await updates.Check(old,CancellationToken.None)==null);
             prerelease=false;tamperManifest=true;

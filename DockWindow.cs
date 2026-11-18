@@ -72,7 +72,7 @@ internal sealed class DockWindow : GlassWindow
         MouseMove += (_, _) => { if(Native.GetCursorPos(out var p)) ObservePointer(p); };
         MouseLeave += (_, _) => { if(Native.GetCursorPos(out var p)) ObservePointer(p); };
         items.SizeChanged += (_, _) => { RefreshGeometry(); EnsureWave(); };
-        IsVisibleChanged += (_, _) => { if (!IsVisible) {wakePointer=null;ResetMagnification();CancelTip();ClearDropVisual();EndKeyboard();ClearDockSelection();ClearDoubleClickState();} };
+        IsVisibleChanged += (_, _) => { if (!IsVisible) {wakePointer=null;ResetMagnification();CancelTip();ClearDropVisual();EndKeyboard();ClearDoubleClickState();} };
         Focusable=true;
         PreviewKeyDown+=OnDockKey;
         Deactivated+=(_,_)=>{if(KeyboardActive){EndKeyboard();owner.DockKeyboardEnded();}};
@@ -83,10 +83,7 @@ internal sealed class DockWindow : GlassWindow
             CancelTip(true);owner.SettleDockMotion();
             if (KeyboardActive) EndKeyboard();
             if (a.ChangedButton == MouseButton.Left && !layout.Any(item => item.Entry != null && item.Element.IsMouseOver))
-            {
-                ClearDockSelection();
                 ClearDoubleClickState();
-            }
         };
         PreviewMouseRightButtonDown+=(_,_)=>Native.SuppressAppStartingCursor();
         PreviewMouseRightButtonUp+=(_,_)=>Native.RestoreSystemCursors();
@@ -124,32 +121,13 @@ internal sealed class DockWindow : GlassWindow
     long menuEpoch;
     nint returnFocus;
     Border? keyboardTile;
-    Border? selectedDockTile;
-    string? lastDockClickId,lastDrawerClickId;
-    long lastDockClickTick,lastDrawerClickTick;
-    Native.Point lastDockClickPoint,lastDrawerClickPoint;
+    string? lastDrawerClickId;
+    long lastDrawerClickTick;
+    Native.Point lastDrawerClickPoint;
     internal bool KeyboardActive=>keyboardTile!=null;
 
-    internal void ClearDoubleClickState(){lastDockClickId=null;lastDrawerClickId=null;lastDockClickTick=0;lastDrawerClickTick=0;}
-    void ClearDockSelection()
-    {
-        var previous=selectedDockTile;
-        selectedDockTile=null;
-        if(previous!=null)PaintDockHighlight(previous);
-    }
-    void SelectDockTile(Border root)
-    {
-        var previous=selectedDockTile;
-        selectedDockTile=root;
-        if(previous!=null&&previous!=root)PaintDockHighlight(previous);
-        PaintDockHighlight(root);
-    }
-    void PaintDockHighlight(Border tile)
-    {
-        if (tile.Child is Grid { Children.Count: > 0 } canvas && canvas.Children[0] is Grid icon)
-            Theme.PaintTileShadow(icon, tile == selectedDockTile);
-    }
-    internal void ActivateTile(Entry e,Border root,bool inDrawer)
+    internal void ClearDoubleClickState(){lastDrawerClickId=null;lastDrawerClickTick=0;}
+    void ActivateTile(Entry e,bool inDrawer)
     {
         if((Keyboard.Modifiers&ModifierKeys.Alt)!=0&&!e.IsVirtual&&!string.IsNullOrWhiteSpace(e.Path))
         {
@@ -157,7 +135,7 @@ internal sealed class DockWindow : GlassWindow
             owner.ShowProperties(new[]{e});
             return;
         }
-        if(!owner.Store.Data.DoubleClickToOpen)
+        if(!inDrawer||!owner.Store.Data.DoubleClickToOpen)
         {
             if(inDrawer)
             {
@@ -173,37 +151,18 @@ internal sealed class DockWindow : GlassWindow
         Native.GetCursorPos(out var pt);
         uint doubleTime=Native.GetDoubleClickTime();
         int maxDx=Math.Max(4,Native.DoubleClickWidth*2),maxDy=Math.Max(4,Native.DoubleClickHeight*2);
-        if(inDrawer)
+        owner.Drawer?.FocusGrid();
+        owner.Drawer?.SelectOnly(e);
+        bool second=lastDrawerClickId==e.Id&&now-lastDrawerClickTick<=doubleTime&&
+            Math.Abs(pt.X-lastDrawerClickPoint.X)<=maxDx&&Math.Abs(pt.Y-lastDrawerClickPoint.Y)<=maxDy;
+        if(second)
         {
-            owner.Drawer?.FocusGrid();
-            owner.Drawer?.SelectOnly(e);
-            bool second=lastDrawerClickId==e.Id&&now-lastDrawerClickTick<=doubleTime&&
-                Math.Abs(pt.X-lastDrawerClickPoint.X)<=maxDx&&Math.Abs(pt.Y-lastDrawerClickPoint.Y)<=maxDy;
-            if(second)
-            {
-                lastDrawerClickId=null;lastDrawerClickTick=0;
-                owner.Launch(e,dockClick:false);
-            }
-            else
-            {
-                lastDrawerClickId=e.Id;lastDrawerClickTick=now;lastDrawerClickPoint=pt;
-            }
+            ClearDoubleClickState();
+            owner.Launch(e,dockClick:false);
         }
         else
         {
-            bool second=lastDockClickId==e.Id&&now-lastDockClickTick<=doubleTime&&
-                Math.Abs(pt.X-lastDockClickPoint.X)<=maxDx&&Math.Abs(pt.Y-lastDockClickPoint.Y)<=maxDy;
-            if(second)
-            {
-                lastDockClickId=null;lastDockClickTick=0;
-                ClearDockSelection();
-                owner.Launch(e,dockClick:true);
-            }
-            else
-            {
-                SelectDockTile(root);
-                lastDockClickId=e.Id;lastDockClickTick=now;lastDockClickPoint=pt;
-            }
+            lastDrawerClickId=e.Id;lastDrawerClickTick=now;lastDrawerClickPoint=pt;
         }
     }
 
@@ -216,7 +175,6 @@ internal sealed class DockWindow : GlassWindow
 
     void EndKeyboard()
     {
-        ClearDockSelection();
         if(keyboardTile==null)return;
         keyboardTile.BorderBrush=Brushes.Transparent;
         keyboardTile=null;
@@ -456,8 +414,8 @@ internal sealed class DockWindow : GlassWindow
         };
         iconHost.Children.Add(Icons.View(owner.Icon(e.Path, l.Icon), l.Icon, lightGlyphShadow:false));
         Theme.AddTileShadow(iconHost,root,()=>owner.Store.Data.ReducedMotion);
-        root.MouseEnter += (_, _) => PaintDockHighlight(root);
-        root.MouseLeave += (_, _) => PaintDockHighlight(root);
+        root.MouseEnter += (_, _) => Theme.PaintTileShadow(iconHost,false);
+        root.MouseLeave += (_, _) => Theme.PaintTileShadow(iconHost,false);
         canvas.Children.Add(iconHost);
 
         var dot = new Border
@@ -473,7 +431,7 @@ internal sealed class DockWindow : GlassWindow
         // Reordering and file drops. Dragging also carries the real file list so the icon can be
         // dragged out to Explorer or another application.
         Point start = default; Native.Point startScreen = default; bool dragged = false, pressedHere = false;
-        PointerSort.Attach(root,this,()=>true,()=>layout.Where(n=>n.Entry!=null).Select(n=>n.Element).ToArray(),null,(ids,id,index)=>owner.CommitSort(ids,id,index,true),active=>{if(active)ClearDoubleClickState();owner.InternalDragging=active;mouseInhibited=active;ResetMagnification();if(!active)owner.FinishDrag();},()=>ActivateTile(e,root,false),external:()=>{ClearDoubleClickState();owner.InternalDragging=true;try{var data=ShellOps.DragData(e.Id,owner.DragPaths(e),false,"dock",e.IsAlias);System.Windows.DragDrop.DoDragDrop(root,data,DragDropEffects.Copy|DragDropEffects.Link|(e.IsAlias?DragDropEffects.None:DragDropEffects.Move));}finally{owner.InternalDragging=false;mouseInhibited=false;owner.FinishDrag();}},reduced:()=>owner.Store.Data.ReducedMotion);
+        PointerSort.Attach(root,this,()=>true,()=>layout.Where(n=>n.Entry!=null).Select(n=>n.Element).ToArray(),null,(ids,id,index)=>owner.CommitSort(ids,id,index,true),active=>{if(active)ClearDoubleClickState();owner.InternalDragging=active;mouseInhibited=active;ResetMagnification();if(!active)owner.FinishDrag();},()=>ActivateTile(e,false),external:()=>{ClearDoubleClickState();owner.InternalDragging=true;try{var data=ShellOps.DragData(e.Id,owner.DragPaths(e),false,"dock",e.IsAlias);System.Windows.DragDrop.DoDragDrop(root,data,DragDropEffects.Copy|DragDropEffects.Link|(e.IsAlias?DragDropEffects.None:DragDropEffects.Move));}finally{owner.InternalDragging=false;mouseInhibited=false;owner.FinishDrag();}},reduced:()=>owner.Store.Data.ReducedMotion);
         root.PreviewMouseLeftButtonDown += (_, a) => { start = a.GetPosition(root); Native.GetCursorPos(out startScreen); dragged = false; pressedHere = true; root.CaptureMouse(); };
         root.PreviewMouseMove += (_, a) =>
         {
@@ -489,7 +447,7 @@ internal sealed class DockWindow : GlassWindow
             finally { owner.InternalDragging = false; mouseInhibited = false; owner.FinishDrag(); }
         };
         root.LostMouseCapture += (_, _) => { pressedHere = false; };
-        root.MouseLeftButtonUp += (_, a) => { bool moved = dragged || MovedPastThreshold(start, startScreen, a.GetPosition(root), owner.Scale); bool invoke = pressedHere && !moved && !owner.InternalDragging && PointerSort.Active == null && root.IsMouseOver; pressedHere = false; if (root.IsMouseCaptured) root.ReleaseMouseCapture(); if (invoke) ActivateTile(e, root, false); a.Handled = true; };
+        root.MouseLeftButtonUp += (_, a) => { bool moved = dragged || MovedPastThreshold(start, startScreen, a.GetPosition(root), owner.Scale); bool invoke = pressedHere && !moved && !owner.InternalDragging && PointerSort.Active == null && root.IsMouseOver; pressedHere = false; if (root.IsMouseCaptured) root.ReleaseMouseCapture(); if (invoke) ActivateTile(e,false); a.Handled = true; };
 
         var menu = new ContextMenu();
         EntryMenu.Fill(menu, owner, new[] { e });
@@ -1150,7 +1108,7 @@ internal sealed class DockWindow : GlassWindow
         root.MouseLeave += (_, _) => { if(inDrawer)owner.Drawer?.PaintTile(root);AnimateIcon(iconHost, 1); };
 
         Point start = default; Native.Point startScreen = default; bool dragged = false, pressedHere = false, selectionHandled = false;
-        if(inDrawer)PointerSort.Attach(root,owner.Drawer,()=>true,()=>owner.Drawer!.SortTiles(e.Source=="manual"),()=>owner.Drawer?.Scroller,(ids,id,index)=>owner.CommitSort(ids,id,index,false),active=>{if(active)ClearDoubleClickState();owner.InternalDragging=active;},()=>{if(Native.IsControlDown()||Native.IsShiftDown()){var ctrl=Native.IsControlDown();var shift=Native.IsShiftDown();ClearDoubleClickState();owner.Drawer?.FocusGrid();owner.Drawer?.ClickSelect(e,ctrl,shift);return;}ActivateTile(e,root,true);},()=>{owner.Drawer!.FocusGrid();if(owner.Drawer.IsSelected(e)!=true)owner.Drawer.ClickSelect(e,false,false);},external:()=>{ClearDoubleClickState();owner.InternalDragging=true;try{var data=ShellOps.DragData(e.Id,owner.DragPaths(e),false,"drawer",e.IsAlias);System.Windows.DragDrop.DoDragDrop(root,data,DragDropEffects.Copy|DragDropEffects.Link|(e.IsAlias?DragDropEffects.None:DragDropEffects.Move));}finally{owner.InternalDragging=false;owner.FinishDrag();}},reduced:()=>owner.Store.Data.ReducedMotion,prepare:()=>owner.SettleDrawerMotion(),owner:owner,sortAllowed:()=>owner.Store.Data.Mode=="自定义");
+        if(inDrawer)PointerSort.Attach(root,owner.Drawer,()=>true,()=>owner.Drawer!.SortTiles(e.Source=="manual"),()=>owner.Drawer?.Scroller,(ids,id,index)=>owner.CommitSort(ids,id,index,false),active=>{if(active)ClearDoubleClickState();owner.InternalDragging=active;},()=>{if(Native.IsControlDown()||Native.IsShiftDown()){var ctrl=Native.IsControlDown();var shift=Native.IsShiftDown();ClearDoubleClickState();owner.Drawer?.FocusGrid();owner.Drawer?.ClickSelect(e,ctrl,shift);return;}ActivateTile(e,true);},()=>{owner.Drawer!.FocusGrid();if(owner.Drawer.IsSelected(e)!=true)owner.Drawer.ClickSelect(e,false,false);},external:()=>{ClearDoubleClickState();owner.InternalDragging=true;try{var data=ShellOps.DragData(e.Id,owner.DragPaths(e),false,"drawer",e.IsAlias);System.Windows.DragDrop.DoDragDrop(root,data,DragDropEffects.Copy|DragDropEffects.Link|(e.IsAlias?DragDropEffects.None:DragDropEffects.Move));}finally{owner.InternalDragging=false;owner.FinishDrag();}},reduced:()=>owner.Store.Data.ReducedMotion,prepare:()=>owner.SettleDrawerMotion(),owner:owner,sortAllowed:()=>owner.Store.Data.Mode=="自定义");
         root.PreviewMouseLeftButtonDown += (_, a) =>
         {
             start = a.GetPosition(root); Native.GetCursorPos(out startScreen); dragged = false; pressedHere = true; selectionHandled = false;
@@ -1191,7 +1149,7 @@ internal sealed class DockWindow : GlassWindow
             bool shouldOpen = pressedHere && !moved && !selectionHandled && !owner.InternalDragging && PointerSort.Active == null && root.IsMouseOver && !Native.IsControlDown() && !Native.IsShiftDown();
             pressedHere = false;
             selectionHandled = false;
-            if (shouldOpen) ActivateTile(e, root, inDrawer);
+            if (shouldOpen) ActivateTile(e,inDrawer);
             a.Handled = true;
         };
 

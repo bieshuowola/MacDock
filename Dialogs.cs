@@ -89,7 +89,7 @@ internal static class Dialogs
         });
         var motion=Toggle(data.ReducedMotion,value=>c.SaveSetting(()=>data.ReducedMotion,v=>data.ReducedMotion=v,value));
         var openMode=Choice(new[]{"单击打开","双击打开"},data.DoubleClickToOpen?1:0);
-        openMode.SelectionChanged+=(_,_)=>{if(correcting||openMode.SelectedIndex<0)return;if(!c.SaveSetting(()=>data.DoubleClickToOpen,v=>data.DoubleClickToOpen=v,openMode.SelectedIndex==1)){correcting=true;openMode.SelectedIndex=data.DoubleClickToOpen?1:0;correcting=false;}else c.Drawer?.ApplySelectionVisuals();};
+        openMode.SelectionChanged+=(_,_)=>{if(correcting||openMode.SelectedIndex<0)return;if(!c.SaveSetting(()=>data.DoubleClickToOpen,v=>data.DoubleClickToOpen=v,openMode.SelectedIndex==1)){correcting=true;openMode.SelectedIndex=data.DoubleClickToOpen?1:0;correcting=false;}else { c.Dock.ClearDoubleClickState(); c.Drawer?.ApplySelectionVisuals(); }};
         bool recordingKey=false;
         var bindKey=ButtonFor(Native.KeyName(data.SuppressWakeKey),()=>{});
         bindKey.MinWidth=88;bindKey.Margin=new Thickness(0);bindKey.Effect=null;bindKey.FocusVisualStyle=null;
@@ -120,7 +120,7 @@ internal static class Dialogs
             c.SetSuppressWakeKey(vk);
             RefreshSuppressButtons();
         };
-        var openModeRow=Row("图标打开方式",openMode);
+        var openModeRow=Row("抽屉图标打开方式",openMode);
         var suppressRow=Row("按住屏蔽 Dock 唤出按键",suppressPanel);
         System.Windows.Automation.AutomationProperties.SetName(bindKey,"按住屏蔽 Dock 唤出按键");
         System.Windows.Automation.AutomationProperties.SetName(clearKey,"清除屏蔽唤醒按键");

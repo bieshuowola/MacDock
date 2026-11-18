@@ -18,4 +18,8 @@
     <AssemblyMetadata Include="MacDockReleaseRepository" Value="$(MacDockReleaseRepository)" />
     <AssemblyMetadata Include="MacDockUpdatePublicKey" Value="$(MacDockUpdatePublicKey)" />
   </ItemGroup>
+  <ItemGroup Condition="'$(MacDockBuildSequence)' != '' And '$(MacDockBuildFingerprint)' != ''">
+    <AssemblyMetadata Include="MacDockBuildSequence" Value="$(MacDockBuildSequence)" />
+    <AssemblyMetadata Include="MacDockBuildFingerprint" Value="$(MacDockBuildFingerprint)" />
+  </ItemGroup>
 </Project>

@@ -1640,7 +1640,7 @@ internal static class ExperienceChecks
             using var key=ECDsa.Create(ECCurve.NamedCurves.nistP256);
             var current=Version.Parse(ReleaseUpdates.CurrentVersion);
             var next=new Version(current.Major,current.Minor,current.Build+1).ToString(3);
-            var manifest=JsonSerializer.SerializeToUtf8Bytes(new ReleaseUpdates.Manifest(next,$"MacDock-{next}-win-x64-Setup.exe",1,new string('a',64),"演示更新说明"));
+            var manifest=JsonSerializer.SerializeToUtf8Bytes(new ReleaseUpdates.Manifest(next,$"MacDock-{next}-win-x64-Setup.exe",1,new string('a',64),"演示更新说明",BuildSequence:long.MaxValue,BuildFingerprint:Guid.NewGuid().ToString("N"),PayloadSha256:new string('b',64)));
             var signature=key.SignData(manifest,HashAlgorithmName.SHA256,DSASignatureFormat.IeeeP1363FixedFieldConcatenation);
             int checksSent=0;string scenario="current";
             using var http=new HttpClient(new Feed(async uri=>

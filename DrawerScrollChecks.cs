@@ -84,17 +84,27 @@ internal static class DrawerScrollChecks
                 var bar=scroll.OverlayBar??throw new InvalidOperationException("Overlay scrollbar not found.");
                 var barCenter=bar.PointToScreen(new Point(bar.ActualWidth/2,bar.ActualHeight/2));
                 var add=drawer.AddFileButton;
-                var addCenter=add.PointToScreen(new Point(add.ActualWidth/2,add.ActualHeight/2));
+                double addRight=add.PointToScreen(new Point(add.ActualWidth,0)).X;
                 var firstRow=drawer.SortTiles(false).Take(controller.Layout.Columns);
-                double right=firstRow.Select(t=>t.PointToScreen(new Point(t.ActualWidth,0)).X).Max();
-                double midpoint=(right+drawer.BodyBounds.Right)/2;
-                bool aligned=Math.Abs(barCenter.X-addCenter.X)<=2&&Math.Abs(barCenter.X-midpoint)<=2;
-                observations.Add(new{phase="gutter",pass=aligned,bar=barCenter.X,add=addCenter.X,midpoint});
+                double iconRight=firstRow.Select(t=>
+                {
+                    var icon=((StackPanel)((Border)t).Child).Children.OfType<Grid>().First();
+                    return icon.PointToScreen(new Point(icon.ActualWidth,0)).X;
+                }).Max();
+                double midpoint=(iconRight+drawer.BodyBounds.Right)/2;
+                bool aligned=Math.Abs(addRight-iconRight)<=1&&Math.Abs(barCenter.X-midpoint)<=1;
+                observations.Add(new{phase="gutter",pass=aligned,bar=barCenter.X,addRight,iconRight,midpoint});
 
                 var thumb=Find<Thumb>(bar)??throw new InvalidOperationException("Scrollbar thumb not found.");
                 var thumbPoint=thumb.PointToScreen(new Point(thumb.ActualWidth/2,thumb.ActualHeight/2));
                 Native.MovePointer((int)thumbPoint.X,(int)thumbPoint.Y);
                 await Task.Delay(180);
+                using(var image=new System.Drawing.Bitmap(drawer.BodyBounds.Right-drawer.BodyBounds.Left,drawer.BodyBounds.Bottom-drawer.BodyBounds.Top))
+                {
+                    using var graphics=System.Drawing.Graphics.FromImage(image);
+                    graphics.CopyFromScreen(drawer.BodyBounds.Left,drawer.BodyBounds.Top,0,0,image.Size);
+                    image.Save(Path.Combine(output,"drawer-alignment.png"));
+                }
                 Native.TestButton(true);
                 try
                 {

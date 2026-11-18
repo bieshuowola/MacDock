@@ -1992,9 +1992,7 @@ internal sealed class Controller : IDisposable
         {
             var saved=System.Text.Json.JsonSerializer.Deserialize<UpdateStatus>(File.ReadAllText(UpdateStatusPath));
             if(saved==null)return;
-            var current=Version.Parse(ReleaseUpdates.CurrentVersion);
-            bool valid=Version.TryParse(saved.Version,out var version)&&(version>current||(version==current&&saved.IsRevision));
-            updateStatus=new UpdateStatus(saved.Checked,valid?saved.Version:null,valid?saved.Notes:null,valid&&saved.IsRevision);
+            updateStatus=new UpdateStatus(saved.Checked,null,null);
         }
         catch(Exception error){DiagnosticsLog.Error(error,"update.history");}
     }
@@ -2035,6 +2033,8 @@ internal sealed class Controller : IDisposable
         if(disposed)return;
         if(UpdateInProgress){if(manual)ShowUpdateWindow(anchor);return;}
         checkingUpdate=true;
+        availableUpdate=null;
+        updateStatus=new UpdateStatus(updateStatus.Checked,null,null);
         UpdateProblem=null;
         UpdateStatusChanged?.Invoke();
         if(manual)ShowUpdateWindow(anchor);
@@ -2089,7 +2089,11 @@ internal sealed class Controller : IDisposable
             using var downloadDeadline=CancellationTokenSource.CreateLinkedTokenSource(updateLifetime.Token);
             downloadDeadline.CancelAfter(TimeSpan.FromMinutes(5));
             var cache=Path.Combine(Path.GetDirectoryName(Store.FilePath)!,"update-cache");
-            var installer=await updater.Download(next,cache,downloadDeadline.Token);
+            var current=Version.Parse(ReleaseUpdates.CurrentVersion);
+            var confirmed=await updater.Check(current,downloadDeadline.Token);
+            if(confirmed!=next)
+                throw new InvalidDataException("Update changed since confirmation.");
+            var installer=await updater.Download(confirmed!,cache,downloadDeadline.Token);
             if(disposed)return;
             if(Process.Start(new ProcessStartInfo(installer){UseShellExecute=true})==null)throw new InvalidOperationException("无法启动安装程序。");
             System.Windows.Application.Current.Shutdown();

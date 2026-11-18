@@ -11,10 +11,13 @@ namespace MacDock;
 
 internal sealed class ReleaseUpdates
 {
-    internal sealed record Manifest(string Version,string FileName,long Size,string Sha256,string Notes,bool IsRevision=false);
-    internal DateTimeOffset? LocalBuildTimeUtc { get; set; }
-    internal string? LocalSumsPath { get; set; }
-    internal string? LocalBinaryPath { get; set; }
+    internal sealed record Manifest(string Version,string FileName,long Size,string Sha256,string Notes,bool IsRevision=false,
+        long BuildSequence=0,string? BuildFingerprint=null,string? PayloadSha256=null);
+    internal long LocalBuildSequence { get; init; }
+    internal string? LocalBuildFingerprint { get; init; }
+    internal string? LocalBinaryPath { get; init; }
+    readonly System.Runtime.CompilerServices.ConditionalWeakTable<Manifest,object> verified = new();
+    static readonly object Verified = new();
     const int MaxMetadata=64*1024;
     const long MaxPackage=250L*1024*1024;
     static readonly Regex RepoName=new(@"\A[A-Za-z0-9][A-Za-z0-9-]*/[A-Za-z0-9_.-]+\z");
@@ -29,8 +32,14 @@ internal sealed class ReleaseUpdates
         {
             var values=typeof(ReleaseUpdates).Assembly.GetCustomAttributes<AssemblyMetadataAttribute>().ToDictionary(a=>a.Key,a=>a.Value);
             if(!values.TryGetValue("MacDockReleaseRepository",out var repo)||!values.TryGetValue("MacDockUpdatePublicKey",out var key)||
-                string.IsNullOrWhiteSpace(repo)||string.IsNullOrWhiteSpace(key))return null;
-            return new ReleaseUpdates(repo,Convert.FromBase64String(key),Http);
+                string.IsNullOrWhiteSpace(repo)||string.IsNullOrWhiteSpace(key)||
+                !long.TryParse(values.GetValueOrDefault("MacDockBuildSequence"),out var sequence)||sequence<=0||
+                !Guid.TryParseExact(values.GetValueOrDefault("MacDockBuildFingerprint"),"N",out var fingerprint)||fingerprint==Guid.Empty)
+                return null;
+            return new ReleaseUpdates(repo,Convert.FromBase64String(key),Http)
+            {
+                LocalBuildSequence=sequence,LocalBuildFingerprint=fingerprint.ToString("N")
+            };
         }
     }
     static readonly HttpClient Http=new(new HttpClientHandler{AllowAutoRedirect=false})
@@ -56,6 +65,7 @@ internal sealed class ReleaseUpdates
         {
             if(!Trusted(uri))throw new InvalidDataException("更新服务器返回了不受信任的地址。");
             using var request=new HttpRequestMessage(HttpMethod.Get,uri);
+            request.Headers.CacheControl=new CacheControlHeaderValue{NoCache=true,NoStore=true};
             request.Headers.UserAgent.ParseAdd("MacDock-Update/"+CurrentVersion);
             if(uri.IdnHost=="api.github.com")request.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("application/vnd.github+json"));
             var response=await client.SendAsync(request,HttpCompletionOption.ResponseHeadersRead,cancellation).ConfigureAwait(false);
@@ -101,130 +111,28 @@ internal sealed class ReleaseUpdates
         var tag=root.GetProperty("tag_name").GetString();
         if(tag==null||!ReleaseTag.IsMatch(tag)||!Version.TryParse(tag[1..],out var version))return null;
         if(version<installed)return null;
-        if(version==installed)return await CheckSameVersionRevision(root,tag,version,cancellation).ConfigureAwait(false);
         var bytes=await SmallFile(Asset(tag,"macdock-update.json"),cancellation).ConfigureAwait(false);
         var signature=await SmallFile(Asset(tag,"macdock-update.sig"),cancellation).ConfigureAwait(false);
-        return VerifyManifest(bytes,signature,version);
-    }
-
-    static (DateTimeOffset Time, bool Reliable) GetLocalBuildTimeInfo()
-    {
-        try
+        var manifest=VerifyManifest(bytes,signature,version);
+        if(manifest.BuildSequence<LocalBuildSequence)return null;
+        if(manifest.BuildSequence==LocalBuildSequence)
         {
-            var exe=Environment.ProcessPath;
-            if(!string.IsNullOrWhiteSpace(exe))
-            {
-                var infoPath=Path.Combine(Path.GetDirectoryName(exe)!,"BUILDINFO.json");
-                if(File.Exists(infoPath))
-                {
-                    using var doc=JsonDocument.Parse(File.ReadAllText(infoPath));
-                    if(doc.RootElement.TryGetProperty("built",out var b)&&b.ValueKind==JsonValueKind.String&&
-                        DateTimeOffset.TryParse(b.GetString(),out var built))return (built.ToUniversalTime(),true);
-                }
-                return (new DateTimeOffset(File.GetLastWriteTimeUtc(exe),TimeSpan.Zero),false);
-            }
-        }
-        catch{}
-        return (DateTimeOffset.UtcNow,false);
-    }
-
-    static string? ComputeSha256(string path)
-    {
-        try
-        {
-            using var fs=File.OpenRead(path);
-            return Convert.ToHexString(SHA256.HashData(fs)).ToLowerInvariant();
-        }
-        catch{return null;}
-    }
-
-    static string? ParseSha256Sum(string text,string fileName)
-    {
-        foreach(var raw in text.Split('\n',StringSplitOptions.RemoveEmptyEntries))
-        {
-            var line=raw.Trim();
-            if(line.Length<66)continue;
-            var parts=line.Split((char[]?)null,2,StringSplitOptions.RemoveEmptyEntries);
-            if(parts.Length==2&&parts[0].Length==64&&parts[0].All(Uri.IsHexDigit)&&
-                string.Equals(parts[1].Trim(),fileName,StringComparison.OrdinalIgnoreCase))
-                return parts[0].ToLowerInvariant();
-        }
-        return null;
-    }
-
-    async Task<Manifest?> CheckSameVersionRevision(JsonElement root,string tag,Version version,CancellationToken cancellation)
-    {
-        if(!root.TryGetProperty("assets",out var assets)||assets.ValueKind!=JsonValueKind.Array)return null;
-        string verStr=version.ToString(3);
-        string setupName=$"MacDock-{verStr}-win-x64-Setup.exe";
-        string portableName=$"MacDock-{verStr}-win-x64-Portable.zip";
-        long setupSize=0;
-        DateTimeOffset? setupUpdatedAt=null,portableUpdatedAt=null,sumsUpdatedAt=null;
-        bool hasSums=false;
-        foreach(var asset in assets.EnumerateArray())
-        {
-            var name=asset.TryGetProperty("name",out var n)?n.GetString():null;
-            DateTimeOffset? parsedUpdatedAt=asset.TryGetProperty("updated_at",out var ua)&&DateTimeOffset.TryParse(ua.GetString(),out var dt)?dt.ToUniversalTime():null;
-            if(string.Equals(name,setupName,StringComparison.OrdinalIgnoreCase))
-            {
-                if(asset.TryGetProperty("size",out var sz)&&sz.TryGetInt64(out var s))setupSize=s;
-                setupUpdatedAt=parsedUpdatedAt;
-            }
-            else if(string.Equals(name,portableName,StringComparison.OrdinalIgnoreCase))
-            {
-                portableUpdatedAt=parsedUpdatedAt;
-            }
-            else if(string.Equals(name,"SHA256SUMS.txt",StringComparison.OrdinalIgnoreCase))
-            {
-                hasSums=true;
-                sumsUpdatedAt=parsedUpdatedAt;
-            }
-        }
-        if(!hasSums||setupSize is <=0 or >MaxPackage)return null;
-        var remoteUpdated=setupUpdatedAt??portableUpdatedAt??sumsUpdatedAt;
-        string? localSumsFile=LocalSumsPath;
-        string? exeDir=Environment.ProcessPath is string ep?Path.GetDirectoryName(ep):null;
-        if(localSumsFile==null&&exeDir!=null)
-        {
-            var candidate=Path.Combine(exeDir,"SHA256SUMS.txt");
-            if(File.Exists(candidate))localSumsFile=candidate;
-        }
-        string? localSha=localSumsFile!=null&&File.Exists(localSumsFile)?ParseSha256Sum(File.ReadAllText(localSumsFile),setupName):null;
-        string? localBinaryFile=LocalBinaryPath??(exeDir!=null?Path.Combine(exeDir,"MacDock.dll"):null);
-        if(localBinaryFile!=null&&!File.Exists(localBinaryFile))localBinaryFile=Environment.ProcessPath;
-        bool hasLocalBinary=localBinaryFile!=null&&File.Exists(localBinaryFile);
-        var (localTime,reliableTime)=LocalBuildTimeUtc is { } explicitTime?(explicitTime.ToUniversalTime(),true):GetLocalBuildTimeInfo();
-        var tolerance=reliableTime?TimeSpan.FromSeconds(15):TimeSpan.FromMinutes(2);
-        bool timeSuggestsNewer=remoteUpdated!=null&&remoteUpdated.Value>localTime.Add(tolerance);
-        bool canHashBinary=hasLocalBinary&&(LocalBinaryPath!=null||LocalBuildTimeUtc==null);
-        if(localSha==null&&!canHashBinary&&!timeSuggestsNewer)return null;
-        var sumsBytes=await SmallFile(Asset(tag,"SHA256SUMS.txt"),cancellation).ConfigureAwait(false);
-        var sumsText=System.Text.Encoding.UTF8.GetString(sumsBytes);
-        var remoteSha=ParseSha256Sum(sumsText,setupName);
-        if(remoteSha==null)return null;
-        if(localSha!=null)
-        {
-            if(string.Equals(localSha,remoteSha,StringComparison.OrdinalIgnoreCase))return null;
-        }
-        else
-        {
-            string? remoteBinSha=hasLocalBinary?ParseSha256Sum(sumsText,Path.GetFileName(localBinaryFile!))??ParseSha256Sum(sumsText,"MacDock.dll"):null;
-            if(remoteBinSha!=null&&hasLocalBinary)
-            {
-                string? targetPath=ParseSha256Sum(sumsText,Path.GetFileName(localBinaryFile!))!=null?localBinaryFile:
-                    (exeDir!=null&&File.Exists(Path.Combine(exeDir,"MacDock.dll"))?Path.Combine(exeDir,"MacDock.dll"):localBinaryFile);
-                string? localBinSha=targetPath!=null?ComputeSha256(targetPath):null;
-                if(localBinSha!=null&&string.Equals(localBinSha,remoteBinSha,StringComparison.OrdinalIgnoreCase))return null;
-                if(localBinSha==null&&!timeSuggestsNewer)return null;
-            }
-            else if(!timeSuggestsNewer)
-            {
+            if(version==installed&&string.Equals(LocalBuildFingerprint,manifest.BuildFingerprint,StringComparison.OrdinalIgnoreCase))
                 return null;
-            }
+            throw new InvalidDataException("构建序号与已安装构建冲突。");
         }
-        var notes=root.TryGetProperty("body",out var bodyEl)&&bodyEl.ValueKind==JsonValueKind.String&&!string.IsNullOrWhiteSpace(bodyEl.GetString())
-            ?bodyEl.GetString()!:"检测到同版本修订构建，建议更新以获取最新修复。";
-        return new Manifest(verStr,setupName,setupSize,remoteSha,notes,IsRevision:true);
+        if(string.Equals(LocalBuildFingerprint,manifest.BuildFingerprint,StringComparison.OrdinalIgnoreCase))
+            throw new InvalidDataException("更新重复使用了已安装构建的指纹。");
+        var binary=LocalBinaryPath??typeof(ReleaseUpdates).Assembly.Location;
+        if(version==installed&&File.Exists(binary))
+        {
+            using var file=File.OpenRead(binary);
+            if(CryptographicOperations.FixedTimeEquals(SHA256.HashData(file),Convert.FromHexString(manifest.PayloadSha256!)))
+                return null;
+        }
+        manifest=manifest with { IsRevision=version==installed };
+        verified.Add(manifest,Verified);
+        return manifest;
     }
 
     Manifest VerifyManifest(byte[] bytes,byte[] signature,Version version)
@@ -236,13 +144,17 @@ internal sealed class ReleaseUpdates
             throw new InvalidDataException("更新签名验证失败。");
         var manifest=JsonSerializer.Deserialize<Manifest>(bytes);
         if(manifest==null||manifest.Version!=version.ToString(3)||manifest.FileName!=$"MacDock-{version.ToString(3)}-win-x64-Setup.exe"||
-            manifest.Size is <=0 or >MaxPackage||manifest.Sha256?.Length!=64||!manifest.Sha256.All(Uri.IsHexDigit)||manifest.Notes==null)
+            manifest.Size is <=0 or >MaxPackage||manifest.Sha256?.Length!=64||!manifest.Sha256.All(Uri.IsHexDigit)||manifest.Notes==null||
+            manifest.BuildSequence<=0||!Guid.TryParseExact(manifest.BuildFingerprint,"N",out var fingerprint)||fingerprint==Guid.Empty||
+            manifest.PayloadSha256?.Length!=64||!manifest.PayloadSha256.All(Uri.IsHexDigit))
             throw new InvalidDataException("更新清单格式或版本不符。");
         return manifest;
     }
 
     internal async Task<string> Download(Manifest manifest,string cache,CancellationToken cancellation)
     {
+        if(!verified.TryGetValue(manifest,out _))
+            throw new InvalidDataException("下载需要经过签名验证的更新清单。");
         var directory=Path.Combine(cache,Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(directory);
         var partial=Path.Combine(directory,"setup.partial");

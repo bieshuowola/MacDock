@@ -691,7 +691,7 @@ internal sealed class DrawerWindow : GlassWindow
         appliedLayout=l;appliedScale=owner.Scale;
         Width = Math.Round(l.DrawerWidth*owner.Scale)/owner.Scale+2*MaterialInset; Height = FrameHeight+2*MaterialInset;
         UseFlatSurface();
-        var (_, _, gridW, chrome) = GridMetrics(l);
+        var (tileW, _, gridW, chrome) = GridMetrics(l);
         scroll.Height = l.GridHeight;
         main.Margin = new Thickness(chrome, l.DrawerPadTop, chrome, l.DrawerPadBottom);
         search.Height = l.SearchHeight;
@@ -701,18 +701,21 @@ internal sealed class DrawerWindow : GlassWindow
         searchHost.Width=Math.Clamp(PanelWidth-chrome*2-210,0,280);
         groups.Width = owner.Store.Data.ListView ? double.NaN : gridW;
         groups.HorizontalAlignment = owner.Store.Data.ListView ? HorizontalAlignment.Stretch : HorizontalAlignment.Center;
-        PlaceScrollChrome(gridW,chrome);
+        PlaceScrollChrome(gridW,tileW,chrome);
         QueueAnchorRestore();
         InvalidatePrebakedSurface();
     }
 
-    void PlaceScrollChrome(double gridWidth,double chrome)
+    void PlaceScrollChrome(double gridWidth,double tileWidth,double chrome)
     {
-        double inner=PanelWidth-2*chrome;
-        double contentRight=owner.Store.Data.ListView?PanelWidth-chrome-12:chrome+(inner+gridWidth)/2;
-        double axis=Math.Round((PanelWidth+contentRight)*.5*owner.Scale)/owner.Scale;
-        scroll.PlaceOverlayBar(PanelWidth-chrome-axis);
-        actionsPanel.Margin=new Thickness(0,0,PanelWidth-chrome-axis-addFileBtn.Width/2,0);
+        double innerRight=PanelWidth-chrome;
+        bool listView=owner.Store.Data.ListView;
+        double iconRight=listView?innerRight-12:
+            (PanelWidth+gridWidth-tileWidth+owner.Layout.DrawerIcon)/2;
+        double axis=Math.Round((PanelWidth+iconRight)*.5*owner.Scale)/owner.Scale;
+        scroll.PlaceOverlayBar(innerRight-axis);
+        actionsPanel.Margin=new Thickness(0,0,
+            innerRight-(listView?axis+addFileBtn.Width/2:iconRight),0);
     }
 
     public void Prepare() { ApplyLayout(); Render(); }
@@ -1138,7 +1141,7 @@ internal sealed class DrawerWindow : GlassWindow
             .Concat(Alphabet.Groups(entries.Where(e => e.Source == "manual"), owner.Store.Data.Mode).Select(g => (Key: "manual:" + g.Key, Title: "手动添加 · 快捷入口" + (g.Key.Length > 0 ? " · " + g.Key : ""), Items: g.ToArray())))
             .ToList();
 
-        var (tileW, gapX, gridW, _) = GridMetrics(l);
+        var (tileW, gapX, gridW, chrome) = GridMetrics(l);
         if (renderedListView != listView || Math.Abs(renderedUnit - l.Unit) > 0.001 || Math.Abs(renderedScale - owner.Scale) > 0.001)
         {
             groups.Children.Clear();
@@ -1327,7 +1330,7 @@ internal sealed class DrawerWindow : GlassWindow
         }
 
         ApplySelectionVisuals();
-        PlaceScrollChrome(gridW,GridMetrics(l).Chrome);
+        PlaceScrollChrome(gridW,tileW,chrome);
         QueueAnchorRestore();
         if (!IsVisible && meshAttached) Surface?.InvalidateVisual();
         groups.BeginAnimation(OpacityProperty, null);

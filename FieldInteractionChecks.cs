@@ -68,7 +68,7 @@ internal static class FieldInteractionChecks
         static double Shadow(Border tile)=>Elements<Grid>(tile).First(g=>g.Children.Count>1&&
             g.Children[1] is Border { Background: RadialGradientBrush }).Children[1].Opacity;
         static bool Borderless(Border tile)=>tile.BorderBrush==Brushes.Transparent&&tile.FocusVisualStyle==null;
-        async Task ShadowMotion(string surface,Border[] tiles,Native.Point first,Native.Point second,Native.Point blank)
+        async Task ShadowMotion(string surface,Border[] tiles,Native.Point first,Native.Point second,Native.Point blank,bool selectedAfterClick)
         {
             await Move(blank);
             await Until(()=>tiles.All(t=>Shadow(t)==0));
@@ -84,9 +84,11 @@ internal static class FieldInteractionChecks
             var rise=await Observe(()=>Native.MovePointer(first.X,first.Y),tiles[0],155);
             var press=await Observe(()=>Native.TestButton(true),tiles[0],85);
             var release=await Observe(()=>Native.TestButton(false),tiles[0],160);
+            double resting=selectedAfterClick?1:.48;
             Check(surface+" hover, down and up retarget the same shadow",
-                rise.Any(x=>x>.03&&x<.45)&&press.Any(x=>x>.50&&x<.74)&&release.Any(x=>x>.78&&x<.99)&&
-                Math.Abs(Shadow(tiles[0])-1)<.001&&Borderless(tiles[0]),new{rise,press,release});
+                rise.Any(x=>x>.03&&x<.45)&&press.Any(x=>x>.50&&x<.74)&&
+                release.Any(x=>selectedAfterClick?x>.78&&x<.99:x>.50&&x<.74)&&
+                Math.Abs(Shadow(tiles[0])-resting)<.001&&Borderless(tiles[0]),new{rise,press,release});
             var fade=await Observe(()=>
             {
                 Native.MovePointer(blank.X,blank.Y);
@@ -151,40 +153,30 @@ internal static class FieldInteractionChecks
             Native.GetWindowRect(c.Dock.Handle,out var dock);
             var blankDock=new Native.Point(dock.Left+6,(dock.Top+dock.Bottom)/2);
             await Move(blankDock);
-            await Until(()=>entries.All(e=>!c.Icon(e.Path,c.Layout.Icon).Loading));
             if(shadowOnly)
             {
                 ApplyLightGlyph(c.Icon(entries[0].Path,c.Layout.Icon));
                 CheckSingleShadow("Dock",dockTiles[0]);
-                await ShadowMotion("Dock",dockTiles,c.Dock.TileCenter(entries[0].Id),c.Dock.TileCenter(entries[1].Id),blankDock);
+                await ShadowMotion("Dock",dockTiles,c.Dock.TileCenter(entries[0].Id),c.Dock.TileCenter(entries[1].Id),blankDock,false);
             }
             int launched=c.LaunchCount;
-            await Click(c.Dock.TileCenter(entries[0].Id));
-            await Until(()=>Shadow(dockTiles[0])==1);
-            Check("Dock mouse selection uses shadow only",Shadow(dockTiles[0])==1&&Borderless(dockTiles[0])&&c.LaunchCount==launched);
-            Grab("dock-selected");
-            await Click(c.Dock.TileCenter(entries[1].Id));
-            await Until(()=>Shadow(dockTiles[1])==1&&Shadow(dockTiles[0])==0);
-            Check("Dock selection switches",Shadow(dockTiles[0])==0&&Shadow(dockTiles[1])==1&&c.LaunchCount==launched);
+            var dockPoint=c.Dock.TileCenter(entries[0].Id);
+            await Click(dockPoint);
+            Check("Dock opens once on a single click with drawer double-click enabled",
+                c.LaunchCount==launched+1&&Borderless(dockTiles[0]));
             await Click(blankDock);
             await Until(()=>dockTiles.All(t=>Shadow(t)==0));
-            Check("Dock blank click clears selection",dockTiles.All(t=>Shadow(t)==0));
-            await Click(c.Dock.TileCenter(entries[1].Id));
-            Check("Dock blank click breaks double-click sequence",c.LaunchCount==launched);
-            var dockPoint=c.Dock.TileCenter(entries[1].Id);
-            await Click(dockPoint);
-            await Until(()=>Shadow(dockTiles[1])<1);
-            Check("Dock double-click launches once and clears selection",c.LaunchCount==launched+1&&Shadow(dockTiles[1])<1);
+            Check("Dock blank click produces no launch or residual shadow",
+                c.LaunchCount==launched+1&&dockTiles.All(t=>Shadow(t)==0));
             await OpenDrawer();
             var drawer=c.Drawer!;
             var drawerTiles=entries.Select(e=>Tile(drawer,e)).ToArray();
             var drawerBlank=new Native.Point(drawer.BodyBounds.Right-70,drawer.BodyBounds.Top+280);
             if(shadowOnly)
             {
-                await Until(()=>!c.Icon(entries[0].Path,c.Layout.DrawerIcon).Loading);
                 ApplyLightGlyph(c.Icon(entries[0].Path,c.Layout.DrawerIcon));
                 CheckSingleShadow("Drawer",drawerTiles[0]);
-                await ShadowMotion("Drawer",drawerTiles,drawer.TileCenter(entries[0].Id),drawer.TileCenter(entries[1].Id),drawerBlank);
+                await ShadowMotion("Drawer",drawerTiles,drawer.TileCenter(entries[0].Id),drawer.TileCenter(entries[1].Id),drawerBlank,true);
             }
             await Click(drawer.TileCenter(entries[0].Id));
             await Until(()=>Shadow(drawerTiles[0])==1);
