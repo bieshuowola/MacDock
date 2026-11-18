@@ -3,6 +3,7 @@ using System.IO;
 using System.Net;
 using System.Net.Http;
 using System.Security.Cryptography;
+using System.Runtime.InteropServices;
 using System.Text.Json;
 using System.Windows;
 using System.Windows.Controls;
@@ -151,6 +152,7 @@ internal static class ExperienceChecks
                 bool confirmation=Native.Class(Native.GetForegroundWindow())=="#32770";
                 if(confirmation)await Key(0x1B);
                 Check("Shift+Delete requires native confirmation; Escape preserves file",confirmation&&File.Exists(renamed));
+                Check("cancelling permanent deletion leaves the unpinned drawer open",drawer.IsVisible&&!c.DrawerClosing&&!c.DrawerInteractionActive);
                 if(confirmation&&File.Exists(renamed))
                 {
                     await Key(0x2E,0x10);
@@ -164,6 +166,7 @@ internal static class ExperienceChecks
                     }
                     else if(Native.Class(prompt)=="#32770")await Key(0x1B);
                     Check("confirming native Shift+Delete removes only the chosen temporary file",confirm!=null&&!File.Exists(renamed)&&File.Exists(target)&&Directory.Exists(b));
+                    Check("confirmed permanent deletion leaves drawer open and releases its lease",drawer.IsVisible&&!c.DrawerClosing&&!c.DrawerInteractionActive);
                 }
             }
 
@@ -302,6 +305,57 @@ internal static class ExperienceChecks
         bitmap.Save(path,System.Drawing.Imaging.ImageFormat.Png);
     }
 
+    [StructLayout(LayoutKind.Sequential)]
+    struct DragImage
+    {
+        public int Width, Height;
+        public Native.Point Offset;
+        public nint Bitmap;
+        public uint ColorKey;
+    }
+
+    [ComImport, Guid("DE5BF786-477A-11D2-839D-00C04FD918D0"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+    interface IDragSourceHelper
+    {
+        [PreserveSig] int InitializeFromBitmap(ref DragImage image, System.Runtime.InteropServices.ComTypes.IDataObject data);
+    }
+
+    [DllImport("gdi32.dll")] static extern bool DeleteObject(nint obj);
+    [DllImport("shell32.dll",CharSet=CharSet.Unicode)] static extern int SHParseDisplayName(string path,nint bind,out nint item,uint mask,out uint attributes);
+    [DllImport("shell32.dll")] static extern nint ILFindLastID(nint item);
+    [DllImport("shell32.dll")] static extern int SHCreateDataObject(nint folder,uint count,nint[] children,nint inner,in Guid iid,
+        [MarshalAs(UnmanagedType.Interface)] out System.Runtime.InteropServices.ComTypes.IDataObject data);
+
+    static System.Runtime.InteropServices.ComTypes.IDataObject ExternalFileWithThumbnail(string path)
+    {
+        nint folder=0,item=0;
+        try
+        {
+            Marshal.ThrowExceptionForHR(SHParseDisplayName(Path.GetDirectoryName(path)!,0,out folder,0,out _));
+            Marshal.ThrowExceptionForHR(SHParseDisplayName(path,0,out item,0,out _));
+            var iid=typeof(System.Runtime.InteropServices.ComTypes.IDataObject).GUID;
+            Marshal.ThrowExceptionForHR(SHCreateDataObject(folder,1,new[]{ILFindLastID(item)},0,in iid,out var data));
+            try{AddExternalFileThumbnail(data,path);return data;}
+            catch{Marshal.ReleaseComObject(data);throw;}
+        }
+        finally{Marshal.FreeCoTaskMem(item);Marshal.FreeCoTaskMem(folder);}
+    }
+
+    static void AddExternalFileThumbnail(System.Runtime.InteropServices.ComTypes.IDataObject data,string path)
+    {
+        using var icon=System.Drawing.Icon.ExtractAssociatedIcon(path)??throw new InvalidOperationException("No Shell icon for drag fixture");
+        using var bitmap=new System.Drawing.Bitmap(48,48);
+        using(var graphics=System.Drawing.Graphics.FromImage(bitmap))
+        {
+            graphics.Clear(System.Drawing.Color.Magenta);
+            graphics.DrawIcon(icon,new System.Drawing.Rectangle(6,6,36,36));
+        }
+        var helper=(IDragSourceHelper)new DragDropHelper();
+        var image=new DragImage{Width=48,Height=48,Offset=new Native.Point(4,8),Bitmap=bitmap.GetHbitmap(),ColorKey=0xFF00FF};
+        try{Marshal.ThrowExceptionForHR(helper.InitializeFromBitmap(ref image,data));}
+        finally{DeleteObject(image.Bitmap);Marshal.ReleaseComObject(helper);}
+    }
+
     internal static async Task DragE2E(Controller c)
     {
         Window? backdrop=null;
@@ -408,7 +462,6 @@ internal static class ExperienceChecks
             Native.GetWindowRect(drawer.Handle,out var dr);
             Native.GetWindowRect(c.Dock.Handle,out var dk);
             var shotArea=new System.Drawing.Rectangle(dr.Left-22,dr.Top-14,dr.Right-dr.Left+44,Math.Min(dk.Bottom+18,area.Bottom)-dr.Top+14);
-            SaveTo(Path.Combine(desktop,"drag-verify.png"),shotArea);
             Save("drag-verify.png",shotArea);
 
             if(!draggingMulti||dropTargetId!=folderEntry.Id)
@@ -453,7 +506,6 @@ internal static class ExperienceChecks
         Window? otherWindow=null;
         bool pass=false;
         string detail="";
-        var desktop=Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory);
         var rootDir=Path.Combine(Output,"ext-drop-pin");
         try
         {
@@ -465,6 +517,7 @@ internal static class ExperienceChecks
             Directory.CreateDirectory(outsideSrc);
             var srcFile=Path.Combine(outsideSrc,"external-drop-item.txt");
             File.WriteAllText(srcFile,"external ole drop test");
+            string[] dragFiles={srcFile};
 
             var area=c.WorkArea;
             backdrop=new Window{Title="MacDock 测试背景",ShowInTaskbar=false,Topmost=false,WindowStyle=WindowStyle.None,ResizeMode=ResizeMode.NoResize,Width=area.Width/c.Scale,Height=area.Height/c.Scale};
@@ -482,8 +535,13 @@ internal static class ExperienceChecks
             {
                 if(dragStarted||a.LeftButton!=MouseButtonState.Pressed)return;
                 dragStarted=true;
-                var data=new DataObject(DataFormats.FileDrop,new[]{srcFile});
-                dragEffect=System.Windows.DragDrop.DoDragDrop(otherWindow,data,DragDropEffects.Move|DragDropEffects.Copy|DragDropEffects.Link);
+                var shellData=dragFiles.Length==1&&dragFiles[0]==srcFile?ExternalFileWithThumbnail(srcFile):null;
+                try
+                {
+                    var data=shellData==null?new DataObject(DataFormats.FileDrop,dragFiles):new DataObject(shellData);
+                    dragEffect=System.Windows.DragDrop.DoDragDrop(otherWindow,data,DragDropEffects.Move|DragDropEffects.Copy|DragDropEffects.Link);
+                }
+                finally{if(shellData!=null)Marshal.ReleaseComObject(shellData);}
             };
             otherWindow.Show();
 
@@ -511,7 +569,8 @@ internal static class ExperienceChecks
             // 1. External OLE drag from otherWindow onto Dock App Icon (notepad.exe) -> MUST deposit to Drawer (safe copy), NOT launch/open-with!
             var srcCenter=otherWindow.PointToScreen(new Point(otherWindow.ActualWidth/2,otherWindow.ActualHeight/2));
             var appTileCenter=c.Dock.TileCenter(appEntry.Id);
-            bool helperActiveDuringDrag=false, dragImgNotOccluded=true, hintVisibleDuringDrag=false;
+            bool helperActiveDuringDrag=false, dragImgNotOccluded=false, hintVisibleDuringDrag=false;
+            bool buttonHeldDuringCapture=false;
             string hintTextDuringDrag="";
             await Task.Run(()=>
             {
@@ -534,7 +593,9 @@ internal static class ExperienceChecks
                     hintVisibleDuringDrag=c.Dock.DropHintVisible;
                     hintTextDuringDrag=c.Dock.DropHintText;
                     nint di=Native.FindActiveSysDragImage();
-                    if(di!=0&&Native.IsWindowAbove(c.Dock.Handle,di))dragImgNotOccluded=false;
+                    dragImgNotOccluded=di!=0&&!Native.IsWindowAbove(c.Dock.Handle,di);
+                    buttonHeldDuringCapture=Native.KeyHeld(1);
+                    Save("external-drop-01-hover.png",Native.MonitorArea(c.Screen,false));
                 });
                 Native.TestButton(false);
                 Thread.Sleep(400);
@@ -545,7 +606,8 @@ internal static class ExperienceChecks
             var hitHwnd=Native.WindowFromPoint(appTileCenter);
             bool dropPreviewCleanedUp=!Native.DropPreviewHelper.IsActive&&!c.ExternalFileDragActive&&!c.Dock.DropHintVisible;
             bool droppedToDesktop=dragStarted&&File.Exists(landedPath)&&File.Exists(srcFile)&&c.Store.Data.Entries.Any(x=>string.Equals(x.Path,landedPath,StringComparison.OrdinalIgnoreCase))&&c.LaunchCount==launchesBeforeExt;
-            if(!droppedToDesktop||!helperActiveDuringDrag||!hintVisibleDuringDrag||hintTextDuringDrag!="松开放入抽屉"||Native.DropPreviewHelper.DragEnterCount<=0||Native.DropPreviewHelper.LastEnterEffects!=DragDropEffects.Copy||!dragImgNotOccluded||!dropPreviewCleanedUp)
+            Save("external-drop-02-released.png",Native.MonitorArea(c.Screen,false));
+            if(!droppedToDesktop||!helperActiveDuringDrag||!hintVisibleDuringDrag||hintTextDuringDrag!="松开放入抽屉"||Native.DropPreviewHelper.DragEnterCount<=0||Native.DropPreviewHelper.LastEnterEffects!=DragDropEffects.Copy||!dragImgNotOccluded||!dropPreviewCleanedUp||!buttonHeldDuringCapture)
                 throw new InvalidOperationException($"External Dock app-hover drop/preview failed: dropped={droppedToDesktop}, srcKept={File.Exists(srcFile)}, hintVis={hintVisibleDuringDrag}, hint='{hintTextDuringDrag}', helperActive={helperActiveDuringDrag}, enterCount={Native.DropPreviewHelper.DragEnterCount}, effects={Native.DropPreviewHelper.LastEnterEffects}, notOccluded={dragImgNotOccluded}, cleanedUp={dropPreviewCleanedUp}, dragStarted={dragStarted}, effect={dragEffect}, launchDelta={c.LaunchCount-launchesBeforeExt}");
 
             // 1b. Duplicate name + folder + shortcut safe-copy drop onto Dock blank/gateway + cancel test + Alt secondary open
@@ -563,6 +625,39 @@ internal static class ExperienceChecks
             bool batchSafeCopyOk=File.Exists(srcFile)&&Directory.Exists(subDir)&&File.Exists(lnkFile)&&Directory.Exists(Path.Combine(testDesktop,"ext-folder"))&&File.Exists(Path.Combine(testDesktop,"ext-link.lnk"))&&Directory.GetFiles(testDesktop,"external-drop-item*.txt").Length>=2;
             if(!batchSafeCopyOk)
                 throw new InvalidOperationException($"Batch/duplicate safe-copy failed: files={string.Join(",",Directory.GetFiles(testDesktop).Select(Path.GetFileName))}");
+
+            // Exercise the real OLE completion contract as well as Shell's conflict handling.
+            var moveFrom=Path.Combine(outsideSrc,"drop-shift.txt");
+            var moveExisting=Path.Combine(testDesktop,"drop-shift.txt");
+            File.WriteAllText(moveFrom,"moved source");
+            File.WriteAllText(moveExisting,"existing destination");
+            dragFiles=new[]{moveFrom};dragStarted=false;dragEffect=DragDropEffects.None;
+            c.SetExternalFileDrag(true);c.Expand();c.SettleDockMotion();c.Dock.UpdateLayout();
+            appTileCenter=c.Dock.TileCenter(appEntry.Id);
+            await Task.Run(()=>
+            {
+                Native.MovePointer((int)srcCenter.X,(int)srcCenter.Y);Thread.Sleep(70);
+                Native.TestKey(0x10,true);
+                try
+                {
+                    Native.TestButton(true);Thread.Sleep(60);
+                    Native.MovePointer((int)srcCenter.X+24,(int)srcCenter.Y+12);Thread.Sleep(100);
+                    for(int step=1;step<=10;step++)
+                    {
+                        double t=step/10.0;
+                        Native.MovePointer((int)Math.Round(srcCenter.X+(appTileCenter.X-srcCenter.X)*t),(int)Math.Round(srcCenter.Y+(appTileCenter.Y-srcCenter.Y)*t));
+                        Thread.Sleep(25);
+                    }
+                    Thread.Sleep(120);
+                }
+                finally{Native.TestButton(false);Thread.Sleep(120);Native.TestKey(0x10,false);}
+            });
+            for(int w=0;w<40&&(File.Exists(moveFrom)||c.DrawerInteractionActive);w++)await Task.Delay(50);
+            bool shiftCollisionSafe=dragStarted&&dragEffect!=DragDropEffects.Move&&!File.Exists(moveFrom)&&
+                File.ReadAllText(moveExisting)=="existing destination"&&Directory.GetFiles(testDesktop,"drop-shift*.txt")
+                    .Any(path=>path!=moveExisting&&File.ReadAllText(path)=="moved source");
+            if(!shiftCollisionSafe)throw new InvalidOperationException($"Shift+drop failed conflict/ownership checks: started={dragStarted}, effect={dragEffect}, sourceExists={File.Exists(moveFrom)}");
+            dragFiles=new[]{srcFile};
 
             // 1c. Alt + drop onto cmdEntry triggers secondary "open with app" without copying to Drawer
             c.SetExternalFileDrag(true);c.Expand();c.SettleDockMotion();c.Dock.UpdateLayout();
@@ -747,7 +842,6 @@ internal static class ExperienceChecks
             Native.GetWindowRect(drawer.Handle,out var dr);
             Native.GetWindowRect(c.Dock.Handle,out var dk);
             var shotArea=new System.Drawing.Rectangle(dr.Left-22,dr.Top-14,dr.Right-dr.Left+44,Math.Min(dk.Bottom+18,area.Bottom)-dr.Top+14);
-            SaveTo(Path.Combine(desktop,"pin-drop-verify.png"),shotArea);
             Save("pin-drop-verify.png",shotArea);
 
             // 3. Marquee rubber-band selection in drawer blank area
@@ -770,13 +864,13 @@ internal static class ExperienceChecks
             if(!stayedOpenWhilePinned)
                 throw new InvalidOperationException($"Drawer closed despite DrawerPinned=true: visible={drawer.IsVisible}, closing={c.DrawerClosing}");
 
-            // Test clicking top-right close button (×) while pinned resets DrawerPinned and clears shadow
-            if(!c.DrawerPinned)throw new InvalidOperationException("Expected DrawerPinned=true before testing close button");
-            drawer.CloseButton.RaiseEvent(new RoutedEventArgs(System.Windows.Controls.Primitives.ButtonBase.ClickEvent));
+            // The gateway remains an explicit close path while the drawer is pinned.
+            if(!c.DrawerPinned)throw new InvalidOperationException("Expected DrawerPinned=true before gateway close");
+            c.ToggleDrawer();
             await Task.Delay(350);
             bool closeResetsPin=!c.DrawerPinned&&drawer.PinButton.Effect==null&&(!drawer.IsVisible||c.DrawerClosing);
             if(!closeResetsPin)
-                throw new InvalidOperationException($"Close button did not reset pin state: DrawerPinned={c.DrawerPinned}, hasEffect={drawer.PinButton.Effect!=null}");
+                throw new InvalidOperationException($"Drawer gateway did not reset pin state: DrawerPinned={c.DrawerPinned}, hasEffect={drawer.PinButton.Effect!=null}");
 
             // Re-open, pin and unlock to verify focus loss closes drawer
             for(int w=0;w<40&&(c.Drawer?.IsVisible==true||c.DrawerMotionRunning);w++)await Task.Delay(30);
@@ -798,7 +892,7 @@ internal static class ExperienceChecks
                 throw new InvalidOperationException("Drawer failed to close on focus loss after unlocking pin");
 
             pass=true;
-            detail=$"droppedToDesktop={droppedToDesktop}, helperActive={helperActiveDuringDrag}, noLaunchOnInvalidDrag={noLaunchOnInvalidDrag}, previewPinZSamples={previewPinZSamples}, pinnedViaDrop={pinnedViaDrop}, selfLoopIgnored={selfLoopIgnored}, marqueeSelected={marqueeSelected}, footerCount={footerCount}, pinnedOn={pinnedOn}, stayedOpenWhilePinned={stayedOpenWhilePinned}, closeResetsPin={closeResetsPin}, unlockedOk={unlockedOk}, closedAfterUnlock={closedAfterUnlock}";
+            detail=$"droppedToDesktop={droppedToDesktop}, helperActive={helperActiveDuringDrag}, batchSafeCopyOk={batchSafeCopyOk}, shiftCollisionSafe={shiftCollisionSafe}, altSecondaryOpenOk={altSecondaryOpenOk}, hintShownBeforeCancel={hintShownBeforeCancel}, noLaunchOnInvalidDrag={noLaunchOnInvalidDrag}, previewPinZSamples={previewPinZSamples}, pinnedViaDrop={pinnedViaDrop}, selfLoopIgnored={selfLoopIgnored}, marqueeSelected={marqueeSelected}, footerCount={footerCount}, pinnedOn={pinnedOn}, stayedOpenWhilePinned={stayedOpenWhilePinned}, closeResetsPin={closeResetsPin}, unlockedOk={unlockedOk}, closedAfterUnlock={closedAfterUnlock}";
         }
         catch(Exception ex)
         {
@@ -1289,6 +1383,9 @@ internal static class ExperienceChecks
             }
 
             var existingPaths=createdDesktopFiles.Take(3).ToArray();
+            var readyBy=DateTime.UtcNow.AddSeconds(3);
+            while(DateTime.UtcNow<readyBy&&existingPaths.Any(p=>drawer.TileControlForPath(p) is not {} t||FindImage(t)?.Source==null))
+                await Task.Delay(50);
             var beforeTiles=existingPaths.ToDictionary(p=>p,p=>drawer.TileControlForPath(p),StringComparer.OrdinalIgnoreCase);
             var beforeImages=existingPaths.ToDictionary(p=>p,p=>beforeTiles[p] is {} t?FindImage(t)?.Source:null,StringComparer.OrdinalIgnoreCase);
             Check("existing files rendered in drawer",beforeTiles.Values.All(t=>t!=null));
@@ -1299,14 +1396,17 @@ internal static class ExperienceChecks
             Check("clipboard fixture prepared",ShellOps.SetFileClipboard(new[]{pasteSrc},false));
 
             c.PasteToDesktop();
-            await Task.Delay(250);
+            var pasteBy=DateTime.UtcNow.AddSeconds(4);
+            while(DateTime.UtcNow<pasteBy&&(c.DrawerInteractionActive||drawer.TileControlForPath(expectedPastedPath)==null))
+                await Task.Delay(40);
             drawer.UpdateLayout();
 
             bool tilesReused=existingPaths.All(p=>ReferenceEquals(beforeTiles[p],drawer.TileControlForPath(p)));
             Check("existing tile UI controls are reused (not destroyed/rebuilt)",tilesReused,existingPaths.Select(p=>new{path=Path.GetFileName(p),same=ReferenceEquals(beforeTiles[p],drawer.TileControlForPath(p))}).ToArray());
 
             bool imagesReused=existingPaths.All(p=>beforeImages[p]!=null&&ReferenceEquals(beforeImages[p],drawer.TileControlForPath(p) is {} t?FindImage(t)?.Source:null));
-            Check("existing icon ImageSource instances stay cached without placeholder flicker",imagesReused);
+            Check("existing icon ImageSource instances stay cached without placeholder flicker",imagesReused,
+                existingPaths.Select(p=>new{path=Path.GetFileName(p),ready=beforeImages[p]!=null,same=ReferenceEquals(beforeImages[p],drawer.TileControlForPath(p) is {} t?FindImage(t)?.Source:null)}).ToArray());
 
             var pastedTile=drawer.TileControlForPath(expectedPastedPath);
             bool pastedAppeared=pastedTile!=null;

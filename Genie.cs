@@ -121,7 +121,7 @@ internal sealed class DrawerMotion
     bool rendering;
     TimeSpan? lastRenderingTime;
     readonly Stopwatch clock=new();readonly Action<double> render;readonly Action<bool> completed;
-    double last;long revision;bool paused;
+    double last;long revision;bool paused,startOnRender;
     volatile bool inputPause,inputEnabled;
     internal bool InputPaused=>inputPause;
     internal void PauseFromHook(){if(inputEnabled)inputPause=true;}
@@ -129,12 +129,13 @@ internal sealed class DrawerMotion
     internal bool Running=>rendering||paused;
     internal DrawerMotion(Action<double> render,Action<bool> completed){this.render=render;this.completed=completed;}
     internal void Snap(double p){GestureChecks.Trace?.Invoke("drawer-snap",new{p,oldTarget=Target,phase=Value});revision++;Stop();paused=false;inputPause=false;Value=Target=p;Velocity=0;render(p);}
-    internal void To(bool open){GestureChecks.Trace?.Invoke("drawer-target",new{open,phase=Value,velocity=Velocity});Target=open?1:0;revision++;paused=false;inputPause=false;if(Math.Abs(Value-Target)<.0001&&Math.Abs(Velocity)<.002){Finish(revision);return;}Start();}
-    void Start()
+    internal void To(bool open,bool startOnRender=false){GestureChecks.Trace?.Invoke("drawer-target",new{open,phase=Value,velocity=Velocity});Target=open?1:0;revision++;paused=false;inputPause=false;if(Math.Abs(Value-Target)<.0001&&Math.Abs(Velocity)<.002){Finish(revision);return;}Start(startOnRender);}
+    void Start(bool onRender=false)
     {
         if (rendering) return;
         inputEnabled = true;
         clock.Restart();
+        startOnRender = onRender;
         last = 0;
         lastRenderingTime = null;
         rendering = true;
@@ -145,6 +146,8 @@ internal sealed class DrawerMotion
     {
         if (!rendering || e is not RenderingEventArgs frame || frame.RenderingTime == lastRenderingTime) return;
         lastRenderingTime = frame.RenderingTime;
+        // Start the cold-open clock on the first render callback, with a single subscription.
+        if(startOnRender){clock.Restart();startOnRender=false;}
         Tick();
     }
     internal void Pause(){if(!rendering)return;Stop();paused=true;}

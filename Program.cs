@@ -80,15 +80,17 @@ internal static class Program
                 bool drawerStability = false;
                 bool drawerPasteReuse = false;
                 bool dockStability = false;
+                bool fieldInteraction = false;
 #if MACDOCK_EXPERIENCE_CHECKS
                 productPreview = args.Contains("--product-preview");
                 dragE2E = args.Contains("--drag-e2e-test");
                 externalDropPin = args.Contains("--external-drop-pin-test");
                 drawerStability = args.Contains("--drawer-stability-test");
                 dockStability = args.Contains("--dock-stability-test");
+                fieldInteraction = args.Contains("--field-interaction-test");
                 testing|=args.Contains("--genie-idle-check");
                 drawerPasteReuse = args.Contains("--drawer-paste-reuse-test");
-                testing|=args.Contains("--experience-test")||productPreview||dragE2E||externalDropPin||drawerStability||dockStability||drawerPasteReuse||args.Contains("--update-ui-test")||args.Contains("--icon-sync-test");
+                testing|=args.Contains("--experience-test")||productPreview||dragE2E||externalDropPin||drawerStability||dockStability||drawerPasteReuse||fieldInteraction||args.Contains("--update-ui-test")||args.Contains("--icon-sync-test");
 #endif
 #if MACDOCK_EXPERIENCE_CHECKS
                 if(testing&&Environment.GetEnvironmentVariable("MACDOCK_QA_SOFTWARE_RENDER")=="1")
@@ -99,12 +101,13 @@ internal static class Program
                 {
                     try{File.Delete(Path.Combine(testProfile,"last-session.json"));}catch{}
                 }
-                c=new Controller(testProfile,autoHide:testing,skipDesktop:productPreview||dragE2E||externalDropPin||drawerStability||dockStability||drawerPasteReuse);
+                c=new Controller(testProfile,autoHide:testing,skipDesktop:productPreview||dragE2E||externalDropPin||drawerStability||dockStability||drawerPasteReuse||fieldInteraction);
                 c.RecordSession(args,testing);
                 if(args.Contains("--first-run-test"))app.Dispatcher.BeginInvoke(DispatcherPriority.Normal,()=>{_=FirstRunChecks.Run(c);});
                 if(args.Contains("--settings-release-test"))app.Dispatcher.BeginInvoke(DispatcherPriority.Normal,()=>{_=SettingsReleaseChecks.Run(c);});
 #if MACDOCK_EXPERIENCE_CHECKS
                 if(args.Contains("--genie-idle-check"))app.Dispatcher.BeginInvoke(DispatcherPriority.Normal,()=>{_=GenieIdleChecks.Run(c);});
+                if(fieldInteraction)app.Dispatcher.BeginInvoke(DispatcherPriority.Normal,()=>{_=FieldInteractionChecks.Run(c);});
                 if(args.Contains("--experience-test"))app.Dispatcher.BeginInvoke(DispatcherPriority.Normal,()=>{_=ExperienceChecks.Run(c);});
                 if(args.Contains("--product-preview"))app.Dispatcher.BeginInvoke(DispatcherPriority.Normal,()=>{_=ExperienceChecks.Capture(c);});
                 if(args.Contains("--drag-e2e-test"))app.Dispatcher.BeginInvoke(DispatcherPriority.Normal,()=>{_=ExperienceChecks.DragE2E(c);});
@@ -189,7 +192,8 @@ internal sealed class Controller : IDisposable
     public Layout Layout => new(WorkArea.Width/Scale,WorkArea.Height/Scale,Store.Data.DockCapacity,Store.Data.DrawerRows,Store.Data.DrawerColumns,DesktopView.IconSizeDip);
     internal bool AutoHideDock { get; set; }
     internal int SuppressWakeKey => Store.Data.SuppressWakeKey;
-    internal bool WakeSuppressedByKey => SuppressWakeKey>0&&Native.KeyHeld(SuppressWakeKey);
+    internal bool WakeSuppressedByKey => SuppressWakeKey>0&&
+        (Native.KeyHeld(SuppressWakeKey)||SuppressWakeKey==Native.GraveWakeKey&&hook?.DesktopWakeKeyHeld==true);
     internal static bool ShouldSuppressDockByKey(bool wakeSuppressedByKey,bool menuOpen,bool busy,bool internalDragging,bool drawerVisible,bool textEditing)=>
         wakeSuppressedByKey&&!menuOpen&&!busy&&!internalDragging&&!drawerVisible&&!textEditing;
     bool SuppressDockActive => ShouldSuppressDockByKey(WakeSuppressedByKey,MenuOpen,Busy,InternalDragging,Drawer?.IsVisible==true,Native.ForegroundTextEditing());
@@ -476,7 +480,7 @@ internal sealed class Controller : IDisposable
         };
         displayRetry.Tick+=(_,_)=>{displayRetry.Stop();RefreshDisplay();};
         modal=new ModalInputGate(()=>System.Windows.Application.Current.Dispatcher.BeginInvoke(()=>{if(!AutoHideBlocked&&!Busy&&!InternalDragging)CloseDrawer(collapseDock:true);}),(int)Native.GetDoubleClickTime(),Native.DoubleClickWidth,Native.DoubleClickHeight,()=>System.Windows.Application.Current.Dispatcher.BeginInvoke(()=>{if(AutoHideBlocked||Busy||InternalDragging)return;drawerLostForeground=true;CloseDrawer(collapseDock:true);UpdateModalRegions();}));
-        hook=new PointerHook(OnPointerEvent,FilterPointer);
+        hook=new PointerHook(OnPointerEvent,FilterPointer,SuppressWakeKey==Native.GraveWakeKey);
         eventProc=(_,evt,h,obj,child,thread,time)=>
         {
             if(disposed)return;
@@ -535,7 +539,7 @@ internal sealed class Controller : IDisposable
             ScheduleSync();
         });
     }
-    void PowerChanged(object? s,PowerModeChangedEventArgs e) { if(e.Mode==PowerModes.Resume)System.Windows.Application.Current.Dispatcher.BeginInvoke(()=> { hook?.Dispose();hook=new PointerHook(OnPointerEvent,FilterPointer);Position();CheckFullscreen();SyncDesktop(); }); }
+    void PowerChanged(object? s,PowerModeChangedEventArgs e) { if(e.Mode==PowerModes.Resume)System.Windows.Application.Current.Dispatcher.BeginInvoke(()=> { ReinstallPointerHook();Position();CheckFullscreen();SyncDesktop(); }); }
     internal void TestResumeLifecycle()=>PowerChanged(null,new PowerModeChangedEventArgs(PowerModes.Resume));
 
     // ---------------------------------------------------------------- desktop mirror
@@ -633,7 +637,9 @@ internal sealed class Controller : IDisposable
     internal bool SetSuppressWakeKey(int vk)
     {
         vk=Math.Clamp(vk,0,254);
+        bool wasGrave=SuppressWakeKey==Native.GraveWakeKey;
         if(!SaveSetting(()=>Store.Data.SuppressWakeKey,v=>Store.Data.SuppressWakeKey=v,vk))return false;
+        if(wasGrave!=(vk==Native.GraveWakeKey))ReinstallPointerHook();
         if(WakeSuppressedByKey){wake.Stop();intent.Reset();}
         if(vk>0)suppressPoll.Start();else{suppressPoll.Stop();if(keySuppressingDock){keySuppressingDock=false;CheckFullscreen();}}
         return true;
@@ -827,7 +833,7 @@ internal sealed class Controller : IDisposable
         foreach(var key in keys)RequestIcon(key.Path,key.Px);
     }
 
-    void ReinstallPointerHook() { try { hook?.Dispose();hook=new PointerHook(OnPointerEvent,FilterPointer); } catch(Exception e) { Program.Log(e); } }
+    void ReinstallPointerHook() { try { hook?.Dispose();hook=new PointerHook(OnPointerEvent,FilterPointer,SuppressWakeKey==Native.GraveWakeKey); } catch(Exception e) { Program.Log(e); } }
     internal void TestReinstallHook()=>ReinstallPointerHook();
 
     // ---------------------------------------------------------------- placement
@@ -1287,7 +1293,7 @@ internal sealed class Controller : IDisposable
         var d=Drawer!;var target=DrawerRect();bool fresh=!d.IsVisible;
         long started=Stopwatch.GetTimestamp();
         drawerFrameStamp=0;drawerMaxFrameMs=0;
-        drawerClosing=false;drawerToken=++drawerEpoch;
+        drawerClosing=false;int token=drawerToken=++drawerEpoch;
         if(fresh){drawerMotion.Snap(0);var gateway=Dock.GatewayCenter;drawerAnchorX=(gateway.X-target.Left)/Scale-d.MaterialInset;drawerAnchorY=(gateway.Y-target.Top)/Scale-d.MaterialInset;new WindowInteropHelper(d).EnsureHandle();d.Place(target.Left,target.Top);d.SetSurfaceOpacity(0);d.SetGenie(0,drawerAnchorX,drawerAnchorY);MeasureDrawerStage("pose-ready");d.Show();MeasureDrawerStage("window-shown");d.Place(target.Left,target.Top);}
         else if(!d.IsDeforming){var gateway=Dock.GatewayCenter;drawerAnchorX=(gateway.X-target.Left)/Scale-d.MaterialInset;drawerAnchorY=(gateway.Y-target.Top)/Scale-d.MaterialInset;d.SetGenie(drawerMotion.Value,drawerAnchorX,drawerAnchorY);}
         d.Activate();if(fresh)d.FocusGrid();d.UpdateLayout();
@@ -1297,21 +1303,13 @@ internal sealed class Controller : IDisposable
         MoveDock(dockRect.Top);UpdateModalRegions();
         double elapsed=Stopwatch.GetElapsedTime(started).TotalMilliseconds;
         if(elapsed>35)DiagnosticsLog.Event("drawer.prepare.slow",new{elapsed,fresh,dpi=Scale*96});
+        if(disposed||drawerClosing||drawerToken!=token||Drawer!=d||!d.IsVisible)return;
         if(Store.Data.ReducedMotion||!Anim.Allowed){drawerMotion.Snap(1);CompleteDrawerMotion(true);}
-        else if(fresh)
+        else
         {
-            int token=drawerToken;
-            EventHandler? onFirstFrame=null;
-            onFirstFrame=(_,_)=>
-            {
-                CompositionTarget.Rendering-=onFirstFrame;
-                if(disposed||drawerClosing||drawerToken!=token||Drawer!=d||!d.IsVisible)return;
-                BeginAnimationBoost();
-                drawerMotion.To(true);
-            };
-            CompositionTarget.Rendering+=onFirstFrame;
+            BeginAnimationBoost();
+            drawerMotion.To(true, startOnRender:fresh);
         }
-        else{BeginAnimationBoost();drawerMotion.To(true);}
     }
     double drawerAnchorX,drawerAnchorY;
 #if MACDOCK_EXPERIENCE_CHECKS
@@ -1365,7 +1363,12 @@ internal sealed class Controller : IDisposable
         }
         drawerHideDeferred = false;
         drawerToken=0;drawerClosing=false;
-        if(open){d.EndGenie();d.SetSurfaceOpacity(1);Position();if(desktopDirty){syncDebounce.Stop();syncDebounce.Start();}}
+        if(open)
+        {
+            d.EndGenie();d.SetSurfaceOpacity(1);
+            if(d.IsActive&&!MenuOpen&&(!d.IsKeyboardFocusWithin||Keyboard.FocusedElement==d))d.FocusGrid();
+            Position();if(desktopDirty){syncDebounce.Stop();syncDebounce.Start();}
+        }
         else
         {
             GestureChecks.Trace?.Invoke("drawer-hide", null);
@@ -1374,6 +1377,7 @@ internal sealed class Controller : IDisposable
                 MoveDock(dockRect.Top);
             d.EndGenie(retainHiddenMesh:true);
             d.ResetSelection();
+            Dock.ClearDoubleClickState();
             UpdateModalRegions();
             QueueDockLeaveCheck();
         }

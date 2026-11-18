@@ -1,0 +1,21 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType><TargetFramework>net8.0-windows10.0.19041.0</TargetFramework>
+    <UseWPF>true</UseWPF><UseWindowsForms>true</UseWindowsForms>
+    <ImplicitUsings>disable</ImplicitUsings><Nullable>enable</Nullable><AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+    <ApplicationIcon>Assets\Brand\MacDock.ico</ApplicationIcon>
+    <WindowsSdkPackageVersion>10.0.19041.56</WindowsSdkPackageVersion><RollForward>LatestMajor</RollForward>
+    <DefaultItemExcludes>$(DefaultItemExcludes);.scratch/**;backup/**</DefaultItemExcludes>
+    <Version>1.9.9</Version><InformationalVersion>$(Version)</InformationalVersion><IncludeSourceRevisionInInformationalVersion>false</IncludeSourceRevisionInInformationalVersion><AssemblyName>MacDock</AssemblyName>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(EnableMacDockExperienceChecks)' == 'true'">
+    <DefineConstants>$(DefineConstants);MACDOCK_EXPERIENCE_CHECKS</DefineConstants>
+  </PropertyGroup>
+  <ItemGroup><None Update="Assets\**\*" CopyToOutputDirectory="PreserveNewest" /></ItemGroup>
+  <ItemGroup><Resource Include="Assets\Brand\MacDock.ico" /></ItemGroup>
+  <ItemGroup Condition="'$(MacDockReleaseRepository)' != '' And '$(MacDockUpdatePublicKey)' != ''">
+    <AssemblyMetadata Include="MacDockReleaseRepository" Value="$(MacDockReleaseRepository)" />
+    <AssemblyMetadata Include="MacDockUpdatePublicKey" Value="$(MacDockUpdatePublicKey)" />
+  </ItemGroup>
+</Project>

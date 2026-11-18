@@ -78,7 +78,16 @@ internal sealed class DockWindow : GlassWindow
         Deactivated+=(_,_)=>{if(KeyboardActive){EndKeyboard();owner.DockKeyboardEnded();}};
         SizeChanged+=(_,_)=>SetReveal(reveal);
         DpiChanged+=(_,_)=>{if(!IsLoaded)return;InvalidateDpiCache();RefreshMaterial();owner.Position();};
-        PreviewMouseDown+=(_,_)=>{CancelTip(true);owner.SettleDockMotion();};
+        PreviewMouseDown+=(_,a)=>
+        {
+            CancelTip(true);owner.SettleDockMotion();
+            if (KeyboardActive) EndKeyboard();
+            if (a.ChangedButton == MouseButton.Left && !layout.Any(item => item.Entry != null && item.Element.IsMouseOver))
+            {
+                ClearDockSelection();
+                ClearDoubleClickState();
+            }
+        };
         PreviewMouseRightButtonDown+=(_,_)=>Native.SuppressAppStartingCursor();
         PreviewMouseRightButtonUp+=(_,_)=>Native.RestoreSystemCursors();
         PreviewDragEnter+=(_,_)=>{CancelTip(true);owner.SettleDockMotion();};
@@ -121,17 +130,24 @@ internal sealed class DockWindow : GlassWindow
     Native.Point lastDockClickPoint,lastDrawerClickPoint;
     internal bool KeyboardActive=>keyboardTile!=null;
 
-    void ClearDoubleClickState(){lastDockClickId=null;lastDrawerClickId=null;lastDockClickTick=0;lastDrawerClickTick=0;}
+    internal void ClearDoubleClickState(){lastDockClickId=null;lastDrawerClickId=null;lastDockClickTick=0;lastDrawerClickTick=0;}
     void ClearDockSelection()
     {
-        if(selectedDockTile!=null&&selectedDockTile!=keyboardTile)selectedDockTile.BorderBrush=Brushes.Transparent;
+        var previous=selectedDockTile;
         selectedDockTile=null;
+        if(previous!=null)PaintDockHighlight(previous);
     }
     void SelectDockTile(Border root)
     {
-        ClearDockSelection();
+        var previous=selectedDockTile;
         selectedDockTile=root;
-        root.BorderBrush=Theme.FocusEdge;
+        if(previous!=null&&previous!=root)PaintDockHighlight(previous);
+        PaintDockHighlight(root);
+    }
+    void PaintDockHighlight(Border tile)
+    {
+        if (tile.Child is Grid { Children.Count: > 0 } canvas && canvas.Children[0] is Grid icon)
+            Theme.PaintTileShadow(icon, tile == selectedDockTile);
     }
     internal void ActivateTile(Entry e,Border root,bool inDrawer)
     {
@@ -175,7 +191,6 @@ internal sealed class DockWindow : GlassWindow
         }
         else
         {
-            SelectDockTile(root);
             bool second=lastDockClickId==e.Id&&now-lastDockClickTick<=doubleTime&&
                 Math.Abs(pt.X-lastDockClickPoint.X)<=maxDx&&Math.Abs(pt.Y-lastDockClickPoint.Y)<=maxDy;
             if(second)
@@ -186,6 +201,7 @@ internal sealed class DockWindow : GlassWindow
             }
             else
             {
+                SelectDockTile(root);
                 lastDockClickId=e.Id;lastDockClickTick=now;lastDockClickPoint=pt;
             }
         }
@@ -214,7 +230,7 @@ internal sealed class DockWindow : GlassWindow
         if(available.Length==0)return;
         EndKeyboard();
         keyboardTile=available[Math.Clamp(index,0,available.Length-1)];
-        keyboardTile.BorderBrush=Theme.FocusEdge;
+        keyboardTile.BorderBrush=SystemParameters.HighContrast?SystemColors.HighlightBrush:Theme.FocusEdge;
         keyboardTile.Focus();
     }
 
@@ -438,7 +454,10 @@ internal sealed class DockWindow : GlassWindow
             Margin = new Thickness(0, 0, 0, 12 * l.Unit), RenderTransformOrigin = new Point(.5, .5),
             RenderTransform = iconScale
         };
-        iconHost.Children.Add(Icons.View(owner.Icon(e.Path, l.Icon), l.Icon));
+        iconHost.Children.Add(Icons.View(owner.Icon(e.Path, l.Icon), l.Icon, lightGlyphShadow:false));
+        Theme.AddTileShadow(iconHost,root,()=>owner.Store.Data.ReducedMotion);
+        root.MouseEnter += (_, _) => PaintDockHighlight(root);
+        root.MouseLeave += (_, _) => PaintDockHighlight(root);
         canvas.Children.Add(iconHost);
 
         var dot = new Border
@@ -1101,7 +1120,8 @@ internal sealed class DockWindow : GlassWindow
             Width = iconSize, Height = iconSize, RenderTransformOrigin = new Point(.5, .55),
             RenderTransform = iconScale, Tag = (e.Path, iconSize)
         };
-        iconHost.Children.Add(Icons.View(owner.Icon(e.Path, iconSize), iconSize));
+        iconHost.Children.Add(Icons.View(owner.Icon(e.Path, iconSize), iconSize, lightGlyphShadow:!inDrawer));
+        if(inDrawer)Theme.AddTileShadow(iconHost,root,()=>owner.Store.Data.ReducedMotion);
         panel.Children.Add(iconHost);
         if (inDrawer)
         {
@@ -1125,7 +1145,7 @@ internal sealed class DockWindow : GlassWindow
         }
         root.Child = panel;
 
-        if(inDrawer)root.BorderThickness=new Thickness(1);
+        if(inDrawer){root.BorderThickness=new Thickness(1);root.FocusVisualStyle=null;}
         root.MouseEnter += (_, _) => { if (inDrawer) owner.Drawer?.PaintTile(root); AnimateIcon(iconHost, inDrawer ? 1.05 : 1); };
         root.MouseLeave += (_, _) => { if(inDrawer)owner.Drawer?.PaintTile(root);AnimateIcon(iconHost, 1); };
 

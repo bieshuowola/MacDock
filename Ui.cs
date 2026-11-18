@@ -80,6 +80,87 @@ internal static class Theme
     public static SolidColorBrush FillActive { get; } = Make(Color.FromArgb(46, 255, 255, 255));
     public static SolidColorBrush SelectionEdge { get; } = Make(Color.FromArgb(64, 255, 255, 255));
     public static SolidColorBrush FocusEdge { get; } = Make(Color.FromArgb(90,255,255,255));
+    static readonly RadialGradientBrush tileShadow = MakeTileShadow();
+
+    static RadialGradientBrush MakeTileShadow()
+    {
+        var brush = new RadialGradientBrush();
+        var shadow = Color.FromRgb(15, 20, 30);
+        brush.GradientStops.Add(new GradientStop(Color.FromArgb(146, shadow.R, shadow.G, shadow.B), .28));
+        brush.GradientStops.Add(new GradientStop(Color.FromArgb(105, shadow.R, shadow.G, shadow.B), .57));
+        brush.GradientStops.Add(new GradientStop(Color.FromArgb(40, shadow.R, shadow.G, shadow.B), .8));
+        brush.GradientStops.Add(new GradientStop(Color.FromArgb(0, shadow.R, shadow.G, shadow.B), 1));
+        brush.Freeze();
+        return brush;
+    }
+
+    internal static void AddTileShadow(Grid icon, Border tile, Func<bool> reducedMotion)
+    {
+        var shadow = new TileShadow(tile, reducedMotion)
+        {
+            Background = tileShadow, Margin = new Thickness(-11), IsHitTestVisible = false, Opacity = 0
+        };
+        Panel.SetZIndex(shadow, -1);
+        icon.Children.Add(shadow);
+    }
+
+    internal static void PaintTileShadow(Grid icon, bool selected)
+        => ((TileShadow)icon.Children[1]).Select(selected);
+
+    sealed class TileShadow : Border
+    {
+        static readonly QuadraticEase ease = CreateEase();
+        readonly Border tile;
+        readonly Func<bool> reducedMotion;
+        bool selected, pressed;
+        double target;
+
+        static QuadraticEase CreateEase()
+        {
+            var result = new QuadraticEase { EasingMode = EasingMode.EaseOut };
+            result.Freeze();
+            return result;
+        }
+
+        internal TileShadow(Border tile, Func<bool> reducedMotion)
+        {
+            this.tile = tile;
+            this.reducedMotion = reducedMotion;
+            tile.AddHandler(PreviewMouseLeftButtonDownEvent, new MouseButtonEventHandler((_, _) => SetPressed(true)), true);
+            tile.AddHandler(PreviewMouseLeftButtonUpEvent, new MouseButtonEventHandler((_, _) => SetPressed(false)), true);
+            tile.LostMouseCapture += (_, _) => SetPressed(false);
+            IsVisibleChanged += (_, _) =>
+            {
+                if (!IsVisible) pressed = false;
+                Update();
+            };
+        }
+
+        internal void Select(bool value) { selected = value; Update(); }
+        void SetPressed(bool value) { pressed = value; Update(); }
+
+        void Update()
+        {
+            bool visible = IsVisible;
+            bool hovered = tile.IsMouseOver;
+            double next = !visible ? 0 : pressed && hovered ? .76 : selected ? 1 : hovered ? .48 : 0;
+            bool animate = visible && !reducedMotion() && Anim.Allowed;
+            if (next == target && animate) return;
+            double current = Opacity;
+            target = next;
+            Opacity = next;
+            if (!animate || Math.Abs(current - next) < .001)
+            {
+                BeginAnimation(OpacityProperty, null);
+                return;
+            }
+            int ms = pressed && hovered ? 60 : next > current ? 95 : 125;
+            BeginAnimation(OpacityProperty, new DoubleAnimation(current, next, TimeSpan.FromMilliseconds(ms))
+            {
+                EasingFunction = ease, FillBehavior = FillBehavior.Stop
+            }, HandoffBehavior.SnapshotAndReplace);
+        }
+    }
 
     public static bool Dark {get;private set;}=true;
     internal static event Action? Changed;

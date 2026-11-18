@@ -14,6 +14,7 @@ internal static partial class Native
     [StructLayout(LayoutKind.Sequential)] internal struct Point { public int X,Y; public Point(int x,int y) { X=x;Y=y; } }
     [StructLayout(LayoutKind.Sequential)] internal struct Rect { public int Left,Top,Right,Bottom; public bool Contains(Point p) => p.X>=Left && p.X<Right && p.Y>=Top && p.Y<Bottom; }
     [StructLayout(LayoutKind.Sequential)] internal struct Mouse { public Point Pt; public uint Data,Flags,Time; public nint Extra; }
+    [StructLayout(LayoutKind.Sequential)] internal struct LowLevelKey { public uint VirtualKey,Scan,Flags,Time; public nuint Extra; }
     internal delegate nint MouseProc(int code, nint wp, nint lp);
     internal delegate void EventProc(nint hook,uint evt,nint hwnd,int obj,int child,uint thread,uint time);
     internal delegate bool EnumProc(nint hwnd,nint data);
@@ -175,7 +176,7 @@ internal static partial class Native
     internal static void TestButton(bool down)=>mouse_event(down?2u:4u,0,0,0,0);
     internal static void TestRightButton(bool down)=>mouse_event(down?8u:16u,0,0,0,0);
     internal static void TestWheel(int delta)=>mouse_event(0x800,0,0,unchecked((uint)delta),0);
-    internal static void TestKey(byte key,bool down,bool extended=false)=>keybd_event(key,0,(down?0u:2u)|(extended?1u:0u),0);
+    internal static void TestKey(byte key,bool down,bool extended=false,byte scan=0)=>keybd_event(key,scan,(down?0u:2u)|(extended?1u:0u),0);
     internal static void MovePointer(int x,int y)
     {
         var r=new System.Drawing.Rectangle(GetSystemMetrics(76),GetSystemMetrics(77),GetSystemMetrics(78),GetSystemMetrics(79));
@@ -697,6 +698,17 @@ internal static partial class Native
         var cls=Class(info.hwndFocus);
         return cls.Equals("Edit",StringComparison.OrdinalIgnoreCase)||cls.StartsWith("RichEdit",StringComparison.OrdinalIgnoreCase);
     }
+    internal const int GraveWakeKey = 0xC0;
+    internal static bool DesktopSearchHasFocus()
+    {
+        var foreground=GetForegroundWindow();
+        if(Class(foreground) is not ("Progman" or "WorkerW"))return false;
+        uint thread=GetWindowThreadProcessId(foreground,out var process);
+        if(thread==0||process!=ShellProcess())return false;
+        var info=new GUITHREADINFO{cbSize=Marshal.SizeOf<GUITHREADINFO>()};
+        return GetGUIThreadInfo(thread,ref info) && info.hwndMenuOwner==0 &&
+            Class(info.hwndFocus) is "SHELLDLL_DefView" or "SysListView32";
+    }
     internal static bool KeyHeld(int vk)
     {
         if(vk<=0)return false;
@@ -729,6 +741,8 @@ internal static partial class Native
     [DllImport("user32.dll")] static extern nint GetWindow(nint hwnd,uint command);
 
     static bool TaskbarClass(string name)=>name is "Shell_TrayWnd" or "Shell_SecondaryTrayWnd";
+    const string TrayOverflowClass = "TopLevelWindowForOverflowXamlIsland";
+    const string ShellPopupClass = "Windows.UI.Core.CoreWindow";
 
     static uint ShellProcess()
     {
@@ -741,10 +755,10 @@ internal static partial class Native
     static bool IsTaskbarPopup(nint window,string name,uint shell)
     {
         if(name is not ("XamlExplorerHostIslandWindow" or "Xaml_WindowedPopupClass" or "TaskListThumbnailWnd" or
-            "TopLevelWindowForOverflowXamlIsland" or "#32768" or "Windows.UI.Core.CoreWindow"))return false;
+            TrayOverflowClass or "#32768" or ShellPopupClass))return false;
         GetWindowThreadProcessId(window,out var process);
         if(process==0)return false;
-        if(name=="Windows.UI.Core.CoreWindow")
+        if(name==ShellPopupClass)
         {
             try
             {
@@ -775,11 +789,16 @@ internal static partial class Native
     {
         uint shell=ShellProcess();
         if(shell==0)return false;
+        // ShellExperienceHost keeps the jump list's foreground proxy outside EnumWindows.
+        var foreground=GetForegroundWindow();
+        if(Class(foreground)==ShellPopupClass&&IsTaskbarPopup(foreground,ShellPopupClass,shell))return true;
         bool found=false;
         EnumWindows((window,_)=>
         {
             if(!IsWindowVisible(window))return true;
-            if(!IsTaskbarPopup(window,Class(window),shell)||!GetWindowRect(window,out var box))return true;
+            var name=Class(window);
+            // Overflow still owns input on its own pixels, but does not block wake elsewhere.
+            if(name==TrayOverflowClass||!IsTaskbarPopup(window,name,shell)||!GetWindowRect(window,out var box))return true;
             if(DwmGetWindowAttribute(window,14,out var cloaked,4)==0&&cloaked!=0)return true;
             var bounds=System.Drawing.Rectangle.FromLTRB(box.Left,box.Top,box.Right,box.Bottom);
             if(bounds.Width<8||bounds.Height<8||workArea is { } area&&!area.IntersectsWith(bounds))return true;

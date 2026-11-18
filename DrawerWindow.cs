@@ -1,6 +1,7 @@
 using System.IO;
 using System.Windows;
 using System.Windows.Controls;
+using System.Windows.Controls.Primitives;
 using System.Windows.Input;
 using System.Windows.Interop;
 using System.Windows.Media;
@@ -332,7 +333,7 @@ internal sealed class DrawerWindow : GlassWindow
         owner = c; Title = "MacDock 应用抽屉";
         // A pressed control must not move away between its down and up. Sorting settles
         // only when its threshold is reached; a simple click uses the current live mesh.
-        PreviewMouseDown+=(_,a)=>{var hit=a.OriginalSource as DependencyObject;var path=new List<string>();while(hit!=null&&path.Count<8){path.Add(hit.GetType().Name+(hit is FrameworkElement f?":"+System.Windows.Automation.AutomationProperties.GetName(f):""));hit=VisualTreeHelper.GetParent(hit);}LastPointerInput=string.Join("/",path)+" @ "+a.GetPosition(Surface).ToString()+" Surface="+Surface?.RenderSize.ToString();owner.PauseDrawerMotion();};
+        PreviewMouseDown+=(_,a)=>{SetKeyboardTileFocus(false);var hit=a.OriginalSource as DependencyObject;var path=new List<string>();while(hit!=null&&path.Count<8){path.Add(hit.GetType().Name+(hit is FrameworkElement f?":"+System.Windows.Automation.AutomationProperties.GetName(f):""));hit=VisualTreeHelper.GetParent(hit);}LastPointerInput=string.Join("/",path)+" @ "+a.GetPosition(Surface).ToString()+" Surface="+Surface?.RenderSize.ToString();owner.PauseDrawerMotion();};
         AddHandler(Mouse.PreviewMouseUpEvent,new MouseButtonEventHandler((_,_)=>Dispatcher.BeginInvoke(()=>owner.ResumeDrawerMotion())),true);
         DragEnter+=(_,_)=>owner.SettleDrawerMotion();
         main.RenderTransformOrigin=new Point(.5,1);main.RenderTransform=entrance;
@@ -537,6 +538,19 @@ internal sealed class DrawerWindow : GlassWindow
         };
         PreviewKeyDown += OnKey;
         PreviewKeyUp+=OnGridKeyUp;
+        PreviewMouseLeftButtonDown+=(_,a)=>
+        {
+            // The viewport handles its own blank clicks and preserves marquee capture.
+            for(var hit=a.OriginalSource as DependencyObject;hit!=null;
+                hit=hit is Visual or System.Windows.Media.Media3D.Visual3D?VisualTreeHelper.GetParent(hit):LogicalTreeHelper.GetParent(hit))
+            {
+                if(hit==scroll||hit==searchHost||hit is ButtonBase)return;
+                if(hit!=Surface)continue;
+                owner.Dock.ClearDoubleClickState();
+                ClearSelection();
+                break;
+            }
+        };
         PreviewMouseRightButtonDown += (_, _) => Native.SuppressAppStartingCursor();
         PreviewMouseRightButtonUp += (_, _) => Native.RestoreSystemCursors();
         scroll.IsKeyboardFocusedChanged+=(_,_)=>{if(!scroll.IsKeyboardFocused)pendingFileKey=Key.None;ApplySelectionVisuals();};
@@ -557,6 +571,7 @@ internal sealed class DrawerWindow : GlassWindow
             bool insideGrid = posInScroll.X >= 0 && posInScroll.Y >= 0 && posInScroll.X <= scroll.ViewportWidth && posInScroll.Y <= scroll.ViewportHeight;
             if (insideGrid && FindTile(a.OriginalSource as DependencyObject) == null && !IsScrollBarHit(a.OriginalSource as DependencyObject))
             {
+                owner.Dock.ClearDoubleClickState();
                 ClearSelection(); Keyboard.ClearFocus();
                 marqueeStart=a.GetPosition(stage);
                 marqueeActive=scroll.CaptureMouse();
@@ -747,6 +762,8 @@ internal sealed class DrawerWindow : GlassWindow
         Dispatcher.BeginInvoke(DispatcherPriority.Loaded,new Action(()=>
         {
             anchorQueued=false;
+            // A wheel gesture that is already underway owns the viewport.
+            if(scroll.IsScrolling){pendingAnchor=null;return;}
             RestoreScrollAnchor();
         }));
     }
@@ -809,6 +826,13 @@ internal sealed class DrawerWindow : GlassWindow
     bool Editing => search.IsKeyboardFocusWithin;
     internal bool TextInputActive=>Editing;
     string? cursorId;
+    bool keyboardTileFocus;
+    void SetKeyboardTileFocus(bool active)
+    {
+        if (keyboardTileFocus == active) return;
+        keyboardTileFocus = active;
+        if (cursorId != null && tiles.TryGetValue(cursorId, out var tile)) PaintTile(tile);
+    }
 
     bool TryKeyboardMenu()
     {
@@ -888,7 +912,7 @@ internal sealed class DrawerWindow : GlassWindow
     internal void ClearSelection()
     {
         bool had = selected.Count > 0 || anchor != null || cursorId != null;
-        selected.Clear(); anchor = null; cursorId = null;
+        selected.Clear(); anchor = null; cursorId = null; keyboardTileFocus = false;
         if (had) ApplySelectionVisuals();
         else UpdateFooter();
     }
@@ -945,14 +969,18 @@ internal sealed class DrawerWindow : GlassWindow
         if(tile==dropTargetTile)return;
         if(tile.Tag is not Entry entry)return;
         bool singleClick=!owner.Store.Data.DoubleClickToOpen;
-        bool selectedTile=selected.Contains(entry.Id),focusedTile=scroll.IsKeyboardFocused&&cursorId==entry.Id,hovered=tile.IsMouseOver;
+        bool selectedTile=selected.Contains(entry.Id),focusedTile=keyboardTileFocus&&scroll.IsKeyboardFocused&&cursorId==entry.Id,hovered=tile.IsMouseOver;
         tile.Cursor=singleClick?Cursors.Hand:Cursors.Arrow;
-        tile.Background=selectedTile?Theme.FillActive:hovered?(singleClick?Theme.FillHover:Theme.FillSoft):Brushes.Transparent;
-        tile.BorderBrush=focusedTile?Theme.FocusEdge:selectedTile?Theme.SelectionEdge:Brushes.Transparent;
+        tile.Background=Brushes.Transparent;
+        tile.BorderBrush=focusedTile?(SystemParameters.HighContrast?SystemColors.HighlightBrush:Theme.FocusEdge):Brushes.Transparent;
         System.Windows.Automation.AutomationProperties.SetItemStatus(tile,selectedTile?"已选择":"");
         if(tile.Child is StackPanel panel)
         {
-            if(panel.Children[0] is Grid icon)icon.Opacity=owner.IsCut(entry)?.45:1;
+            if(panel.Children[0] is Grid icon)
+            {
+                icon.Opacity=owner.IsCut(entry)?.45:1;
+                Theme.PaintTileShadow(icon,selectedTile);
+            }
             foreach(var label in panel.Children.OfType<TextBlock>())label.TextDecorations=singleClick&&hovered?TextDecorations.Underline:null;
         }
     }
@@ -1010,6 +1038,7 @@ internal sealed class DrawerWindow : GlassWindow
 
     void Navigate(Key key,bool ctrl,bool shift)
     {
+        SetKeyboardTileFocus(true);
         if(visibleOrder.Count==0)return;
         int index=visibleOrder.FindIndex(e=>e.Id==cursorId);
         int next=key switch {Key.Home=>0,Key.End=>visibleOrder.Count-1,Key.Left=>index-1,Key.Right=>index+1,_=>index};
@@ -1209,8 +1238,8 @@ internal sealed class DrawerWindow : GlassWindow
                             !string.Equals(bound.Item1, e.Path, StringComparison.OrdinalIgnoreCase) ||
                             Math.Abs(bound.Item2 - l.DrawerIcon) > 0.1))
                         {
-                            iconHost.Children.Clear();
-                            iconHost.Children.Add(Icons.View(owner.Icon(e.Path, l.DrawerIcon), l.DrawerIcon));
+                            iconHost.Children.RemoveAt(0);
+                            iconHost.Children.Insert(0, Icons.View(owner.Icon(e.Path, l.DrawerIcon), l.DrawerIcon, lightGlyphShadow:false));
                             iconHost.Tag = (e.Path, l.DrawerIcon);
                             InvalidatePrebakedSurface();
                         }
