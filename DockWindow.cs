@@ -394,9 +394,24 @@ internal sealed class DockWindow : GlassWindow
             owner.GatewayCaptureEnded(released: true);
         };
         root.AllowDrop=true;
-        root.DragEnter+=(_,a)=>{if(IsExternalFileDrop(a)){a.Effects=ResolveExternalDropEffect(a,out bool _);SetDropVisual("松开放入抽屉",true);a.Handled=true;}else if(a.Data.GetDataPresent(DataFormats.FileDrop)){a.Effects=DragDropEffects.None;a.Handled=true;}};
-        root.DragOver+=(_,a)=>{if(IsExternalFileDrop(a)){a.Effects=ResolveExternalDropEffect(a,out bool _);SetDropVisual("松开放入抽屉",true);a.Handled=true;}else if(a.Data.GetDataPresent(DataFormats.FileDrop)){a.Effects=DragDropEffects.None;a.Handled=true;}};
-        root.Drop+=(_,a)=>{ClearDropVisual();if(IsExternalFileDrop(a)){a.Effects=ResolveExternalDropEffect(a,out bool copy);owner.DropFilesToDesktop((string[])a.Data.GetData(DataFormats.FileDrop),copy);a.Handled=true;}else if(a.Data.GetDataPresent(DataFormats.FileDrop)){a.Effects=DragDropEffects.None;a.Handled=true;}};
+        void PreviewDrawerImport(DragEventArgs a)
+        {
+            if(!a.Data.GetDataPresent(DataFormats.FileDrop))return;
+            a.Effects=IsExternalFileDrop(a)?Controller.ImportEffect(a.KeyStates,a.AllowedEffects):DragDropEffects.None;
+            if(a.Effects!=DragDropEffects.None)SetDropVisual("松开放入抽屉",true);
+            else ClearDropVisual();
+            a.Handled=true;
+        }
+        root.DragEnter+=(_,a)=>PreviewDrawerImport(a);
+        root.DragOver+=(_,a)=>PreviewDrawerImport(a);
+        root.Drop+=(_,a)=>
+        {
+            ClearDropVisual();
+            if(!a.Data.GetDataPresent(DataFormats.FileDrop))return;
+            a.Effects=IsExternalFileDrop(a)?
+                owner.CommitExternalFileDrop(a.Data,Controller.ImportEffect(a.KeyStates,a.AllowedEffects)):DragDropEffects.None;
+            a.Handled=true;
+        };
         drawerButton = root;
         return root;
     }
@@ -489,10 +504,19 @@ internal sealed class DockWindow : GlassWindow
             {
                 a.Effects = ReorderEffect(a); a.Handled = true; return;
             }
-            if (IsExternalFileDrop(a) && !WantsOpenWithApp(a))
+            if (IsExternalFileDrop(a) && (!WantsOpenWithApp(a)||!InCenterDropZone(root,a)))
             {
                 if (entered) Reset();
                 return;
+            }
+            if(IsExternalFileDrop(a)&&bridge==null&&AcceptsFileDropTarget(e))
+            {
+                files=(string[])a.Data.GetData(DataFormats.FileDrop);
+                bridge=new ShellDrop(e.IsVirtual?e.ShellVerb??"":e.Path,files);
+                Native.GetCursorPos(out var enterPoint);
+                bridge.Enter((uint)a.KeyStates&~32u,enterPoint,(uint)a.AllowedEffects);
+                entered=true;
+                hover.Start();
             }
             if (files != null && bridge != null)
             {
@@ -513,9 +537,7 @@ internal sealed class DockWindow : GlassWindow
             {
                 if(!WantsOpenWithApp(a)||!AcceptsFileDropTarget(e)||!InCenterDropZone(root,a)){Reset();return;}
                 ClearDropVisual();
-                bool keepDrawer = false && !ShellDrop.IsExecutableTarget(e.Path);
-                if (keepDrawer) owner.BeginInternalDropProtection();
-                owner.Busy = true;
+                using var interaction=owner.HoldDrawerInteraction();
                 try
                 {
                     Native.GetCursorPos(out var p);
@@ -526,7 +548,7 @@ internal sealed class DockWindow : GlassWindow
                     if (effect == 0) owner.Notify("此目标未接受文件。可按住 Alt 悬停激活运行窗口后再投递。", false);
                 }
                 catch (Exception ex) { owner.Notify("拖放未完成：" + ex.Message); a.Effects = DragDropEffects.None; }
-                finally { owner.SetExternalFileDrag(false); Reset(); if (keepDrawer) owner.EndInternalDropProtection(true); owner.Busy = false; }
+                finally { owner.SetExternalFileDrag(false); Reset(); }
                 a.Handled = true;
             }
         };
@@ -977,29 +999,14 @@ internal sealed class DockWindow : GlassWindow
 
     static bool IsExternalFileDrop(DragEventArgs a) => a.Data.GetDataPresent(DataFormats.FileDrop) && !a.Data.GetDataPresent("MacDock.Entry");
     static bool WantsOpenWithApp(DragEventArgs a) => (a.KeyStates & DragDropKeyStates.AltKey) != 0 || (Native.GetAsyncKeyState(0x12) & 0x8000) != 0;
-    DragDropEffects ResolveExternalDropEffect(DragEventArgs a, out bool copy)
-    {
-        var files = (string[])a.Data.GetData(DataFormats.FileDrop);
-        var destDir = owner.OverrideDesktopFolder ?? Desktop.UserFolder;
-        copy = Controller.ShouldCopyToDirectory(files, destDir, a.KeyStates);
-        if (copy)
-        {
-            if ((a.AllowedEffects & DragDropEffects.Copy) != 0) return DragDropEffects.Copy;
-            if ((a.AllowedEffects & DragDropEffects.Move) != 0) { copy = false; return DragDropEffects.Move; }
-            return DragDropEffects.None;
-        }
-        if ((a.AllowedEffects & DragDropEffects.Move) != 0) return DragDropEffects.Move;
-        if ((a.AllowedEffects & DragDropEffects.Copy) != 0) { copy = true; return DragDropEffects.Copy; }
-        return DragDropEffects.None;
-    }
 
     void BlankOver(object? s, DragEventArgs a)
     {
         if (a.Handled) return;
         if (IsExternalFileDrop(a))
         {
-            a.Effects = ResolveExternalDropEffect(a, out _);
-            SetDropVisual("松开放入抽屉", true);
+            a.Effects = Controller.ImportEffect(a.KeyStates,a.AllowedEffects);
+            if(a.Effects!=DragDropEffects.None)SetDropVisual("松开放入抽屉", true);else ClearDropVisual();
             a.Handled = true;
         }
         else if (a.Data.GetDataPresent(DataFormats.FileDrop))
@@ -1026,9 +1033,7 @@ internal sealed class DockWindow : GlassWindow
         }
         if (IsExternalFileDrop(a))
         {
-            var files = (string[])a.Data.GetData(DataFormats.FileDrop);
-            a.Effects = ResolveExternalDropEffect(a, out bool copy);
-            if (a.Effects != DragDropEffects.None) owner.DropFilesToDesktop(files, copy);
+            a.Effects = owner.CommitExternalFileDrop(a.Data,Controller.ImportEffect(a.KeyStates,a.AllowedEffects));
             a.Handled = true;
         }
         else if (a.Data.GetDataPresent(DataFormats.Bitmap))

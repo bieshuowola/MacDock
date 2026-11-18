@@ -209,13 +209,35 @@ internal sealed class Controller : IDisposable
         if (active) externalDragEscape.Start(); else externalDragEscape.Stop();
         UpdateModalRegions();
     }
-    internal static bool ShouldCopyToDirectory(string[] files, string destDir, DragDropKeyStates keyStates)
+    internal static DragDropEffects ImportEffect(DragDropKeyStates keys,DragDropEffects allowed)
     {
-        // External file drops default to safe copy (preserving source files); hold Shift to move.
-        if ((keyStates & DragDropKeyStates.ShiftKey) != 0 || Native.IsShiftDown()) return false;
-        return true;
+        var requested=(keys&DragDropKeyStates.ShiftKey)!=0?DragDropEffects.Move:DragDropEffects.Copy;
+        return (allowed&requested)!=0?requested:DragDropEffects.None;
     }
-    internal bool AutoHideBlocked => InternalDropProtected || ExternalFileDragActive || (DrawerPinned && Drawer?.IsVisible == true);
+    internal bool AutoHideBlocked => InternalDropProtected || ExternalFileDragActive || DrawerInteractionActive || (DrawerPinned && Drawer?.IsVisible == true);
+    int drawerInteractions;
+    int drawerInteractionRevision;
+    internal bool DrawerInteractionActive=>drawerInteractions>0;
+    internal IDisposable HoldDrawerInteraction()
+    {
+        drawerInteractions++;
+        drawerInteractionRevision++;
+        InteractionChanged();
+        return new DrawerInteraction(this);
+    }
+    sealed class DrawerInteraction(Controller owner):IDisposable
+    {
+        Controller? controller=owner;
+        public void Dispose()
+        {
+            var c=controller;
+            if(c==null)return;
+            controller=null;
+            c.drawerInteractions--;
+            c.drawerInteractionRevision++;
+            c.InteractionChanged();
+        }
+    }
     internal bool InternalDropProtected => internalDropInProgress || Environment.TickCount64 < suppressAutoHideUntilTick;
     internal bool DrawerClosing => drawerClosing;
     internal void BeginInternalDropProtection()
@@ -252,7 +274,7 @@ internal sealed class Controller : IDisposable
     {
         if(disposed)return;
         UpdateModalRegions();
-        if(menuOpen||busy||internalDragging) { Dock?.ObservePointer(default,false);return; }
+        if(menuOpen||busy||internalDragging||DrawerInteractionActive) { Dock?.ObservePointer(default,false);return; }
         if(desktopDirty){syncDebounce.Stop();syncDebounce.Start();}
         QueueDockLeaveCheck();
     }
@@ -465,7 +487,7 @@ internal sealed class Controller : IDisposable
             // per second and used to wake the refresh timer for nothing.
             if(obj!=0) return;
             if(evt==0x800B && h!=Native.GetForegroundWindow()) return;
-            if(evt==3)System.Windows.Application.Current.Dispatcher.BeginInvoke(()=>DrawerFocusChanged());
+            if(evt==3)RequestDrawerFocusCheck();
             if(!refresh.IsEnabled)refresh.Start();
         };
         // Foreground, minimize/restore and active window move/size transitions drive fullscreen and maximized detection.
@@ -559,7 +581,7 @@ internal sealed class Controller : IDisposable
     internal void SyncDesktop(bool force=false)
     {
         if(disposed||skipDesktop)return;
-        if(!force && (InternalDragging||MenuOpen||Busy||drawerMotion.Running||dockMotion.Running)) { desktopDirty=true;return; }
+        if(!force && (InternalDragging||MenuOpen||Busy||DrawerInteractionActive||drawerMotion.Running||dockMotion.Running||Drawer?.Scroller.IsScrolling==true)) { desktopDirty=true;return; }
         desktopDirty=false;
         try
         {
@@ -581,6 +603,10 @@ internal sealed class Controller : IDisposable
         catch(Exception e) { Program.Log(e); }
     }
     internal void SyncDesktopNow()=>SyncDesktop(true);
+    internal void ResumeDeferredDesktopSync()
+    {
+        if(desktopDirty&&!disposed){syncDebounce.Stop();syncDebounce.Start();}
+    }
     internal void RefreshDesktop(){SyncDesktop(true);}
     internal bool SetAppearance(string value)
     {
@@ -660,37 +686,34 @@ internal sealed class Controller : IDisposable
     IconEntry RequestIcon(string path,int px)
     {
         if(disposed)return IconEntry.Empty;
-        var key=(path.ToUpperInvariant(),px);var stamp=IconResources.Stamp(path);IconEntry slot;
+        var key=(path.ToUpperInvariant(),px);IconEntry slot;
         int revision;
         lock(iconGate)
         {
             if(!icons.TryGetValue(key,out slot!)){if(icons.Count>=2048)EvictStaleIcon();icons[key]=slot=new IconEntry();}
-            if(slot.Loading||slot.Stamp==stamp){IconCacheHits++;return slot;}
-            if(Native.TryGetCachedIcon(path,px) is {} cached)
-            {
-                IconCacheHits++;
-                slot.Update(Icons.Measure(cached),stamp);
-                iconRetryAfter.Remove(key);
-                return slot;
-            }
+            // Watchers and the asynchronous reconciliation own stamp validation.
+            // Creating/reusing a tile must not open its target or read the registry.
+            if(slot.Loading||(slot.Stamp.Length!=0&&(!slot.Missing||slot.RetryCount>=3))){IconCacheHits++;return slot;}
             if(iconRetryAfter.TryGetValue(key,out var retryAt)&&Environment.TickCount64<retryAt)return slot;
             slot.Loading=true;revision=slot.Revision;
             IconLoads++;
         }
-        GestureChecks.Trace?.Invoke("icon-request",new{path,px,oldStamp=slot.Stamp,stamp,slot=System.Runtime.CompilerServices.RuntimeHelpers.GetHashCode(slot)});
+        GestureChecks.Trace?.Invoke("icon-request",new{path,px,oldStamp=slot.Stamp,slot=System.Runtime.CompilerServices.RuntimeHelpers.GetHashCode(slot)});
         iconDispatcher.BeginInvoke(DispatcherPriority.Background,()=>
         {
             if(disposed)return;
-            IconEntry result;string version;bool changed=false;
-            try{IconResources.Describe(path);version=IconResources.Stamp(path);result=Icons.Measure(Native.Icon(path,px));if(result.Missing&&IsValidIconTarget(path))DiagnosticsLog.Event("icon.unavailable",new{pixels=px,shell=path.StartsWith("::",StringComparison.Ordinal)});changed=version!=IconResources.Stamp(path);}
+            IconEntry result;string version;bool changed=false,validTarget=false;
+            try{IconResources.Describe(path);version=IconResources.Stamp(path);result=Icons.Measure(Native.Icon(path,px));if(result.Missing&&(validTarget=IsValidIconTarget(path)))DiagnosticsLog.Event("icon.unavailable",new{pixels=px,shell=path.StartsWith("::",StringComparison.Ordinal)});changed=version!=IconResources.Stamp(path);}
             catch(Exception e){DiagnosticsLog.Error(e,"icon.load");result=IconEntry.Empty;version=IconResources.Stamp(path);}
-            System.Windows.Application.Current.Dispatcher.BeginInvoke(()=>
+            System.Windows.Application.Current.Dispatcher.BeginInvoke(DispatcherPriority.Background,()=>
             {
                 if(disposed)return;
                 if(slot.Revision!=revision||changed){slot.Loading=false;slot.Stamp="";lock(iconGate)iconRetryAfter.Remove(key);RequestIcon(path,px);return;}
+                bool pixelsChanged=slot.Missing||slot.Fingerprint!=result.Fingerprint;
                 slot.Update(result,version);
-                if(!result.Missing){lock(iconGate)iconRetryAfter.Remove(key);if(Drawer!=null&&!Drawer.IsDeforming)Drawer.InvalidatePrebakedSurface();return;}
-                if(slot.RetryCount<3&&IsValidIconTarget(path))
+                if(!result.Missing){lock(iconGate)iconRetryAfter.Remove(key);if(pixelsChanged&&Drawer!=null&&!Drawer.IsDeforming)Drawer.InvalidatePrebakedSurface();return;}
+                if(!validTarget)slot.RetryCount=3;
+                if(slot.RetryCount<3)
                 {
                     slot.RetryCount++;
                     int delayMs=slot.RetryCount==1?500:slot.RetryCount==2?1000:1500;
@@ -728,36 +751,38 @@ internal sealed class Controller : IDisposable
     }
     void RevalidateIcons()
     {
-        if(disposed)return;
-        IconResources.Invalidate();
-        Native.ClearIconCache();
-        lock(iconGate)
-        {
-            iconRetryAfter.Clear();
-            foreach(var slot in icons.Values){slot.Stamp="";slot.Revision++;slot.RetryCount=0;}
-        }
-        // Re-extract active entries asynchronously; IconEntry.Update swaps visuals only when Fingerprint changes (zero flicker).
-        WarmIcons();
+        ReconcileIcons();
     }
     internal void TriggerIconReconcileNow()=>ReconcileIcons();
+    bool reconcilingIcons;
+    bool reconcileAgain;
     void ReconcileIcons()
     {
         if(disposed)return;
-        IconResources.InvalidateAssociations();
-        var stale=new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        var active=Store.Data.Entries.Where(e=>e.InDrawer||e.Pinned).Select(e=>(e.Path,Px:Pixels(e.Pinned?Layout.Icon:Layout.DrawerIcon))).ToArray();
+        if(reconcilingIcons){reconcileAgain=true;return;}
+        var active=Store.Data.Entries.Where(e=>e.InDrawer||e.Pinned).Select(e=>e.Path)
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+        (string Path,string Stamp,IconEntry Slot,int Revision)[] snapshot;
         lock(iconGate)
         {
-            foreach(var item in active)
-            {
-                var key=(item.Path.ToUpperInvariant(),item.Px);
-                if(icons.TryGetValue(key,out var slot)&&!slot.Loading)
-                {
-                    if(slot.Stamp!=IconResources.Stamp(item.Path))stale.Add(item.Path);
-                }
-            }
+            snapshot=icons.Where(pair=>active.Contains(pair.Key.Path)&&!pair.Value.Loading)
+                .Select(pair=>(pair.Key.Path,pair.Value.Stamp,pair.Value,pair.Value.Revision)).ToArray();
         }
-        foreach(var path in stale)RefreshIconPath(path);
+        if(snapshot.Length==0)return;
+        reconcilingIcons=true;
+        var ui=System.Windows.Application.Current.Dispatcher;
+        iconDispatcher.BeginInvoke(DispatcherPriority.Background,()=>{
+            IconResources.InvalidateAssociations();
+            var stale=snapshot.Where(item=>item.Stamp!=IconResources.Stamp(item.Path)).ToArray();
+            ui.BeginInvoke(DispatcherPriority.Background,()=>{
+                reconcilingIcons=false;
+                if(disposed)return;
+                foreach(var path in stale.Where(item=>item.Revision==item.Slot.Revision&&!item.Slot.Loading)
+                    .Select(item=>item.Path).Distinct(StringComparer.OrdinalIgnoreCase))
+                    ScheduleIconPathRefresh(path);
+                if(reconcileAgain){reconcileAgain=false;ScheduleGlobalIconRevalidate();}
+            });
+        });
     }
     void ScheduleIconPathRefresh(string? path)
     {
@@ -911,7 +936,19 @@ internal sealed class Controller : IDisposable
         if(Drawer is not {IsVisible:true}||MenuOpen||Busy||InternalDragging||AutoHideBlocked)return;
         if((Native.GetAsyncKeyState(1)&0x8000)!=0)return; // external OLE source can own focus while the file is being dragged
         var foreground=Native.GetForegroundWindow();
-        if(foreground!=Drawer.Handle&&foreground!=Dock.Handle){drawerLostForeground=true;CloseDrawer(collapseDock:true);UpdateModalRegions();}
+        if(foreground==0||foreground==Drawer.Handle||foreground==Dock.Handle||Native.GetAncestor(foreground,3)==Drawer.Handle)return;
+        drawerLostForeground=true;
+        CloseDrawer(collapseDock:true);
+        UpdateModalRegions();
+    }
+    internal void RequestDrawerFocusCheck()
+    {
+        if(DrawerInteractionActive)return;
+        int revision=drawerInteractionRevision;
+        System.Windows.Application.Current.Dispatcher.BeginInvoke(()=>
+        {
+            if(revision==drawerInteractionRevision)DrawerFocusChanged();
+        });
     }
     void SetDockOpacity(double value) { Dock.SetSurfaceOpacity(value); }
 
@@ -1371,13 +1408,14 @@ internal sealed class Controller : IDisposable
     }
     public void CloseDrawer(bool keepDock=false,bool collapseDock=false,bool force=false)
     {
-        if(InternalDropProtected)return;
+        if(InternalDropProtected||DrawerInteractionActive)return;
         if(!force && AutoHideBlocked)return;
         DrawerPinned=false;
         Drawer?.UpdatePinVisual();
         var d=Drawer;
         if(collapseDock){retainedDockArea=null;if(!DesktopResident)HideDockAnimated();}
         if(d==null||!d.IsVisible||drawerClosing)return;
+        d.FinishScrollForClose();
         if(keepDock&&Native.GetWindowRect(d.Handle,out var previousDrawer))retainedDockArea=new Native.Rect{Left=Math.Min(previousDrawer.Left,dockRect.Left),Right=Math.Max(previousDrawer.Right,dockRect.Right),Top=previousDrawer.Top,Bottom=dockRect.Bottom};
         else retainedDockArea=null;
         drawerClosing=true;drawerToken=++drawerEpoch;
@@ -1465,93 +1503,83 @@ internal sealed class Controller : IDisposable
 
     internal bool DropFilesToDesktop(string[] files, bool copy)
     {
-        if (files == null || files.Length == 0) return false;
-        string destDir = OverrideDesktopFolder ?? Desktop.UserFolder;
-        var valid = files.Where(f => !string.IsNullOrWhiteSpace(f) && (File.Exists(f) || Directory.Exists(f))).Where(f =>
-        {
-            if (!copy)
-            {
-                var parent = Path.GetDirectoryName(Path.GetFullPath(f))?.TrimEnd('\\');
-                var target = Path.GetFullPath(destDir).TrimEnd('\\');
-                if (string.Equals(parent, target, StringComparison.OrdinalIgnoreCase)) return false;
-            }
-            return true;
-        }).ToArray();
-        if (valid.Length == 0) { SetExternalFileDrag(false); return false; }
-        BeginInternalDropProtection();
-        Busy = true;
-        var ownerHwnd = DialogOwner;
-        var appDispatcher = System.Windows.Application.Current.Dispatcher;
-        var worker = new Thread(() =>
-        {
-            bool ok = false;
-            int succeeded = 0, failed = 0;
-            var beforeEntries = new HashSet<string>(Directory.EnumerateFileSystemEntries(destDir), StringComparer.OrdinalIgnoreCase);
-            try
-            {
-                ok = copy
-                    ? ShellOps.Copy(valid, destDir, ownerHwnd, quiet: skipDesktop)
-                    : ShellOps.Move(valid, destDir, ownerHwnd, quiet: skipDesktop);
-                if (ok) succeeded = valid.Length;
-                else if (valid.Length > 1)
-                {
-                    foreach (var item in valid)
-                    {
-                        var single = new[] { item };
-                        bool itemOk = copy
-                            ? ShellOps.Copy(single, destDir, ownerHwnd, quiet: skipDesktop)
-                            : ShellOps.Move(single, destDir, ownerHwnd, quiet: skipDesktop);
-                        if (itemOk) succeeded++; else failed++;
-                    }
-                    ok = succeeded > 0;
-                }
-                else failed = valid.Length;
-            }
-            catch (Exception ex) { Program.Log(ex); }
-            var newItems = Directory.EnumerateFileSystemEntries(destDir).Where(p => !beforeEntries.Contains(p)).ToList();
-            appDispatcher.BeginInvoke(() =>
-            {
-                try
-                {
-                    if (!ok)
-                    {
-                        Notify("存入抽屉未完成或已取消。", false);
-                        return;
-                    }
-                    if (failed > 0)
-                        Notify($"已存入 {succeeded} 项，{failed} 项未完成（权限不足或已取消）。", true);
-                    var landed = new List<string>(newItems);
-                    foreach (var src in valid)
-                    {
-                        var destPath = Path.Combine(destDir, Path.GetFileName(src));
-                        if ((File.Exists(destPath) || Directory.Exists(destPath)) && !landed.Contains(destPath, StringComparer.OrdinalIgnoreCase))
-                            landed.Add(destPath);
-                    }
-                    if (OverrideDesktopFolder != null)
-                    {
-                        foreach (var destPath in landed)
-                        {
-                            if (!Store.Data.Entries.Any(x => string.Equals(x.Path, destPath, StringComparison.OrdinalIgnoreCase)))
-                                Store.Data.Entries.Add(new Entry { Path = destPath, Name = Path.GetFileNameWithoutExtension(destPath), Source = "desktop", AutoName = false });
-                        }
-                        Store.Save();
-                    }
-                    SyncDesktopNow();
-                    Dock.Rebuild();
-                    Drawer?.Render();
-                    if (landed.Count > 0) Drawer?.SelectPaths(landed);
-                }
-                finally
-                {
-                    SetExternalFileDrag(false);
-                    EndInternalDropProtection(restoreDrawerFocus: Drawer?.IsVisible == true);
-                    Busy = false;
-                }
-            });
-        }) { IsBackground = true, Name = "MacDock Drop I/O" };
-        worker.SetApartmentState(ApartmentState.STA);
-        worker.Start();
+        if (files.Length == 0 || fileImportRunning) return false;
+        string destination = OverrideDesktopFolder ?? Desktop.UserFolder;
+        var candidates = files.Where(Path.IsPathFullyQualified)
+            .Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
+        if (candidates.Length == 0) return false;
+        if (!copy && candidates.All(file => IsInDirectory(file, destination))) return false;
+        ImportFiles(candidates, destination, copy);
         return true;
+    }
+
+    internal DragDropEffects CommitExternalFileDrop(IDataObject data, DragDropEffects requested)
+    {
+        if(requested==DragDropEffects.None)return DragDropEffects.None;
+        try
+        {
+            bool copy=requested==DragDropEffects.Copy;
+            if(data.GetData(DataFormats.FileDrop,false) is not string[] files||!DropFilesToDesktop(files,copy))
+                return DragDropEffects.None;
+            if(copy)return DragDropEffects.Copy;
+            // The Shell worker owns the move. An OLE Move result would allow the
+            // source to delete its files before that worker has completed.
+            data.SetData("Performed DropEffect",new MemoryStream(new byte[sizeof(int)]),false);
+        }
+        catch(Exception error){DiagnosticsLog.Error(error,"drop.external");}
+        return DragDropEffects.None;
+    }
+
+    static bool IsInDirectory(string path, string directory) =>
+        string.Equals(Path.TrimEndingDirectorySeparator(Path.GetDirectoryName(path) ?? ""),
+            Path.TrimEndingDirectorySeparator(directory), StringComparison.OrdinalIgnoreCase);
+
+    bool fileImportRunning;
+    async void ImportFiles(string[] paths, string destination, bool copy)
+    {
+        using var interaction = HoldDrawerInteraction();
+        fileImportRunning = true;
+        nint hwnd = DialogOwner;
+        bool quiet = skipDesktop;
+        try
+        {
+            var result = await ShellOps.RunSta(() =>
+            {
+                if (!Directory.Exists(destination)) return (Complete:false, Added:Array.Empty<string>());
+                var before = Directory.GetFileSystemEntries(destination).ToHashSet(StringComparer.OrdinalIgnoreCase);
+                var valid = paths.Where(path => (copy || !IsInDirectory(path, destination)) &&
+                    (File.Exists(path) || Directory.Exists(path))).ToArray();
+                bool complete = valid.Length > 0 && (copy
+                    ? ShellOps.Copy(valid, destination, hwnd, quiet)
+                    : ShellOps.Move(valid, destination, hwnd, quiet, renameOnCollision:true));
+                // Shell may partially complete or cancel a batch. Do not replay the
+                // request or select an older destination with the same name.
+                var added = Directory.GetFileSystemEntries(destination).Where(path => !before.Contains(path)).ToArray();
+                return (Complete:complete && valid.Length == paths.Length, Added:added);
+            });
+            if (disposed) return;
+            if (!result.Complete) Notify("部分或全部文件未存入抽屉，操作可能已取消。", false);
+            if (OverrideDesktopFolder != null && result.Added.Length > 0)
+            {
+                foreach (var path in result.Added)
+                    if (!Store.Data.Entries.Any(e => e.Path.Equals(path,StringComparison.OrdinalIgnoreCase)))
+                        Store.Data.Entries.Add(new Entry{Path=path,Name=Path.GetFileNameWithoutExtension(path),Source="desktop",AutoName=false});
+                Store.Save();
+                Drawer?.Render();
+            }
+            else SyncDesktopNow();
+            if (result.Added.Length > 0) Drawer?.SelectPaths(result.Added, ensureVisible:false);
+        }
+        catch(Exception error)
+        {
+            Program.Log(error);
+            if(!disposed){Notify("无法完成存入抽屉。", false);ScheduleSync();}
+        }
+        finally
+        {
+            fileImportRunning = false;
+            if(!disposed)SetExternalFileDrag(false);
+        }
     }
 
     internal bool SaveDroppedBitmapToDesktop(IDataObject data)
@@ -1709,7 +1737,7 @@ internal sealed class Controller : IDisposable
         finally { Busy=false; }
     }
 
-    internal void PasteToDesktop()
+    internal async void PasteToDesktop()
     {
         var (paths,move)=ShellOps.ReadFileClipboard();
         if(paths.Length==0) {if(Drawer?.IsVisible==true)Drawer.ShowFileStatus("剪贴板中没有可粘贴的文件。");return;}
@@ -1717,10 +1745,13 @@ internal sealed class Controller : IDisposable
         if(!Directory.Exists(destination)) { Notify("找不到桌面文件夹。"); return; }
         bool fromDrawer=Drawer?.IsActive==true;
         var beforePaths=Store.Data.Entries.Where(e=>e.InDrawer).Select(e=>e.Path).ToHashSet(StringComparer.OrdinalIgnoreCase);
-        Busy=true;
+        using var interaction=HoldDrawerInteraction();
+        var hwnd=DialogOwner;
         try
         {
-            var ok=move?ShellOps.Move(paths,destination,DialogOwner):ShellOps.Copy(paths,destination,DialogOwner);
+            var quiet=skipDesktop;
+            var ok=await ShellOps.RunSta(()=>move?ShellOps.Move(paths,destination,hwnd,quiet):ShellOps.Copy(paths,destination,hwnd,quiet));
+            if(disposed)return;
             cut.Clear();
             if(!ok) Notify("粘贴未完成或已取消。",false);
             if(OverrideDesktopFolder!=null)
@@ -1738,7 +1769,8 @@ internal sealed class Controller : IDisposable
             if(added.Length>0) Drawer?.SelectPaths(added, ensureVisible: false);
             else Drawer?.ApplySelectionVisuals();
         }
-        finally { RestoreDrawerAfterShell(fromDrawer);Busy=false; }
+        catch(Exception error){Program.Log(error);Notify("粘贴未完成。");}
+        finally { RestoreDrawerAfterShell(fromDrawer); }
     }
 
     void RestoreDrawerAfterShell(bool fromDrawer)
@@ -1751,51 +1783,60 @@ internal sealed class Controller : IDisposable
         if(drawer.IsActive)drawer.FocusGrid();
     }
 
-    internal void DeleteEntries(IReadOnlyList<Entry> entries,bool permanent)
+    internal async void DeleteEntries(IReadOnlyList<Entry> entries,bool permanent)
     {
         var real=entries.Where(e=>!e.IsVirtual && e.Source=="desktop" && Desktop.IsDesktopPath(e.Path) && (File.Exists(e.Path)||Directory.Exists(e.Path))).ToList();
         var manual=entries.Where(e=>e.IsAlias).ToList();
         if(real.Count==0 && manual.Count==0) {if(entries.Count>0)Drawer?.ShowFileStatus("所选项目不支持删除。");return;}
         bool fromDrawer=Drawer?.IsActive==true;
-        Busy=true;
+        using var interaction=HoldDrawerInteraction();
+        var hwnd=DialogOwner;
         try
         {
-            if(real.Count>0 && !ShellOps.Delete(real.Select(e=>e.Path).ToArray(),permanent,DialogOwner))
+            var paths=real.Select(e=>e.Path).ToArray();
+            if(paths.Length>0 && !await ShellOps.RunSta(()=>ShellOps.Delete(paths,permanent,hwnd)))
             { SyncDesktopNow();Drawer?.ShowFileStatus("删除已取消或未完成。");return; }
+            if(disposed)return;
             if(manual.Count>0&&PersistArrangement(()=>{foreach(var e in manual)Store.Data.Entries.Remove(e);}))mirrorVisualDirty=true;
             cut.Clear();
             SyncDesktopNow();Drawer?.ApplySelectionVisuals();
         }
-        finally { RestoreDrawerAfterShell(fromDrawer);Busy=false; }
+        catch(Exception error){Program.Log(error);Notify("删除未完成。");}
+        finally { RestoreDrawerAfterShell(fromDrawer); }
     }
 
-    internal void RenameEntry(Entry e)
+    internal async void RenameEntry(Entry e)
     {
         if(e.IsVirtual) {Drawer?.ShowFileStatus("此 Windows 系统入口不支持重命名。");return;}
         bool fromDrawer=Drawer?.IsActive==true;
-        Busy=true;
+        using var interaction=HoldDrawerInteraction();
         try
         {
             if(e.IsAlias) { Dialogs.RenameLabel(this,e);return; }
             var name=Dialogs.RenameFile(this,e);
             if(name==null) return;
             if(name is "." or ".."||name.EndsWith('.')||name.IndexOfAny(Path.GetInvalidFileNameChars())>=0){Drawer?.ShowFileStatus("名称包含 Windows 不允许的字符。");return;}
-            if(!ShellOps.Rename(e.Path,name,DialogOwner)) { Notify("重命名未完成或已取消。",false); return; }
-            var folder=Path.GetDirectoryName(e.Path)!;
+            var source=e.Path;
+            var hwnd=DialogOwner;
+            if(!await ShellOps.RunSta(()=>ShellOps.Rename(source,name,hwnd))) { Notify("重命名未完成或已取消。",false); return; }
+            if(disposed)return;
+            var folder=Path.GetDirectoryName(source)!;
             var renamed=Path.Combine(folder,name);
-            Store.Repoint(e.Path,renamed);
+            Store.Repoint(source,renamed);
             Store.Save();SyncDesktopNow();
         }
-        finally { RestoreDrawerAfterShell(fromDrawer);Busy=false; }
+        catch(Exception error){Program.Log(error);Notify("重命名未完成。");}
+        finally { RestoreDrawerAfterShell(fromDrawer); }
     }
 
     internal void ShowProperties(IReadOnlyList<Entry> entries)
     {
         var paths=RealPaths(entries);
         if(paths.Length==0) return;
-        Busy=true;MenuOpen=true;
+        using var interaction=HoldDrawerInteraction();
+        bool fromDrawer=Drawer?.IsActive==true;
         try { if(!ShellOps.Properties(DialogOwner,paths)) Notify("无法打开属性。",false); }
-        finally { MenuOpen=false;Busy=false; }
+        finally { RestoreDrawerAfterShell(fromDrawer); }
     }
 
     internal void CompressEntries(IReadOnlyList<Entry> entries)
@@ -1830,7 +1871,8 @@ internal sealed class Controller : IDisposable
     internal void ShowNativeMenu(IReadOnlyList<Entry> entries,Native.Point? position=null)
     {
         if(entries.Count==0) return;
-        InteractionChecks.Record?.Invoke("shell-start",null);Busy=true;MenuOpen=true;BeginNativeMenu();
+        using var interaction=HoldDrawerInteraction();
+        InteractionChecks.Record?.Invoke("shell-start",null);MenuOpen=true;BeginNativeMenu();
         try
         {
             var p=position.GetValueOrDefault();if(position==null)Native.GetCursorPos(out p);
@@ -1842,7 +1884,7 @@ internal sealed class Controller : IDisposable
             if(!ok) Notify("无法打开 Windows 菜单：所选项目跨多个文件夹或不可用。",false);
             if (ok && ShellMenu.LastCommand > 0) ScheduleSync();
         }
-        finally { EndNativeMenu();MenuOpen=false;Busy=false;DrawerFocusChanged(); }
+        finally { EndNativeMenu();MenuOpen=false; }
     }
 
     bool nativeMenuTracking,nativeMenuPositionPending;
@@ -1855,7 +1897,7 @@ internal sealed class Controller : IDisposable
         Mouse.OverrideCursor=Cursors.Arrow;Native.SetArrowCursor();
     }
     void EndNativeMenu(){nativeMenuTracking=false;Dock.MenuTracking=false;if(Drawer!=null)Drawer.MenuTracking=false;Mouse.OverrideCursor=null;Dock.RefreshMaterial();Drawer?.RefreshMaterial();if(nativeMenuPositionPending){nativeMenuPositionPending=false;Position();}}
-    internal void ShowDesktopBackground(){Busy=true;MenuOpen=true;BeginNativeMenu();try{Native.GetCursorPos(out var p);if(!ShellMenu.ShowBackground(DialogOwner,p.X,p.Y,PasteToDesktop,CanPaste,RefreshDesktop))Notify("Windows 桌面菜单暂不可用。");SyncDesktopNow();}finally{EndNativeMenu();MenuOpen=false;Busy=false;DrawerFocusChanged();}}
+    internal void ShowDesktopBackground(){using var interaction=HoldDrawerInteraction();MenuOpen=true;BeginNativeMenu();try{Native.GetCursorPos(out var p);if(!ShellMenu.ShowBackground(DialogOwner,p.X,p.Y,PasteToDesktop,CanPaste,RefreshDesktop))Notify("Windows 桌面菜单暂不可用。");ScheduleSync();}finally{EndNativeMenu();MenuOpen=false;}}
     internal void SetPinned(IReadOnlyList<Entry> entries,bool pinned)
     {
         if(!PersistArrangement(()=>{foreach(var e in entries)e.Pinned=pinned;}))return;

@@ -101,16 +101,24 @@ internal static class IconResources
         if(Directory.Exists(path))return "";
         long now=Environment.TickCount64;
         if(assocStamps.TryGetValue(ext,out var cached)&&now-cached.Tick<5000)return cached.Stamp;
-        string progId="",hash="",cls="";
+        string progId="",hash="",cls="",defaultIcon="",handler="";
         try
         {
             using var uc=Registry.CurrentUser.OpenSubKey($@"Software\Microsoft\Windows\CurrentVersion\Explorer\FileExts\{ext}\UserChoice");
             if(uc!=null){progId=uc.GetValue("ProgId") as string??"";hash=uc.GetValue("Hash") as string??"";}
             using var kr=Registry.ClassesRoot.OpenSubKey(ext);
             if(kr!=null)cls=kr.GetValue(null) as string??"";
+            var effective=string.IsNullOrWhiteSpace(progId)?cls:progId;
+            if(!string.IsNullOrWhiteSpace(effective))
+            {
+                using var icon=Registry.ClassesRoot.OpenSubKey(effective+@"\DefaultIcon");
+                using var command=Registry.ClassesRoot.OpenSubKey(effective+@"\shell\open\command");
+                defaultIcon=icon?.GetValue(null) as string??"";
+                handler=command?.GetValue(null) as string??"";
+            }
         }
         catch{}
-        string stamp=$"{progId}|{hash}|{cls}";
+        string stamp=$"{progId}|{hash}|{cls}|{defaultIcon}|{handler}";
         if(assocStamps.Count>256)assocStamps.Clear();
         assocStamps[ext]=(now,stamp);
         return stamp;

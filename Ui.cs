@@ -343,23 +343,46 @@ internal class GlassWindow : Window
 
 internal sealed class SmoothScrollViewer : ScrollViewer
 {
-    internal void ResetScroll(){CancelWheel();ScrollToTop();}
-    static readonly DependencyProperty AnimatedOffsetProperty = DependencyProperty.Register("AnimatedOffset", typeof(double), typeof(SmoothScrollViewer), new PropertyMetadata(0.0, (o, e) => ((SmoothScrollViewer)o).ScrollToVerticalOffset((double)e.NewValue)));
-    double target;
+    internal void StopWheel()=>CancelWheel();
+    void ApplyOffset(double value)
+    {
+        if(Content is DrawerScrollViewport view)view.SetVerticalOffset(value);
+        else ScrollToVerticalOffset(value);
+    }
+    double target, wheelStart, appliedOffset;
+    long wheelStartTime;
+    TimeSpan? lastWheelFrame;
     bool wheeling,dragging;
     int wheelRevision;
-    internal string WheelDiagnostics=>$"requests={wheelRevision}; animated={GetValue(AnimatedOffsetProperty)}; target={target}; actual={VerticalOffset}; extent={ExtentHeight}; viewport={ViewportHeight}; measure={IsMeasureValid}; arrange={IsArrangeValid}";
+    internal string WheelDiagnostics=>$"requests={wheelRevision}; animated={appliedOffset}; target={target}; actual={VerticalOffset}; extent={ExtentHeight}; viewport={ViewportHeight}; measure={IsMeasureValid}; arrange={IsArrangeValid}";
     internal bool IsScrolling => wheeling || dragging;
     int fadeToken;
+    double barOpacityTarget;
+    double barInset;
+    readonly TranslateTransform barPosition=new();
     System.Windows.Controls.Primitives.ScrollBar? bar;
     readonly DispatcherTimer hide=new(){Interval=TimeSpan.FromSeconds(1)};
     internal System.Windows.Controls.Primitives.ScrollBar? OverlayBar=>bar;
+    internal void PlaceOverlayBar(double inset)
+    {
+        barInset=inset;
+        AlignOverlayBar();
+    }
+    void AlignOverlayBar()
+    {
+        if(bar==null||bar.ActualWidth<=0||!IsAncestorOf(bar))return;
+        double center=bar.TranslatePoint(new Point(bar.ActualWidth/2,0),this).X-barPosition.X;
+        barPosition.X=ActualWidth-barInset-center;
+    }
     public SmoothScrollViewer()
     {
         Loaded+=(_,_)=>
         {
             ApplyTemplate();var next=Template?.FindName("PART_VerticalScrollBar",this) as System.Windows.Controls.Primitives.ScrollBar;
             if(next==null||ReferenceEquals(next,bar))return;bar=next;bar.Opacity=0;bar.IsHitTestVisible=false;
+            bar.RenderTransform=barPosition;
+            bar.SizeChanged+=(_,_)=>AlignOverlayBar();
+            AlignOverlayBar();
             System.Windows.Automation.AutomationProperties.SetName(bar,"内容滚动条");
             bar.MouseEnter+=(_,_)=>Reveal();bar.MouseLeave+=(_,_)=>Arm();
             bar.AddHandler(System.Windows.Controls.Primitives.Thumb.DragStartedEvent,new System.Windows.Controls.Primitives.DragStartedEventHandler((_,_)=>{dragging=true;CancelWheel();Reveal();}));
@@ -368,20 +391,54 @@ internal sealed class SmoothScrollViewer : ScrollViewer
         hide.Tick+=(_,_)=>
         {
             hide.Stop();if(bar==null||bar.IsMouseOver||dragging)return;
+            barOpacityTarget=0;
             var token=++fadeToken;var animation=new DoubleAnimation(0,TimeSpan.FromMilliseconds(Anim.Allowed?220:0));
             animation.Completed+=(_,_)=>{if(token==fadeToken&&bar!=null)bar.IsHitTestVisible=false;};bar.BeginAnimation(OpacityProperty,animation);
         };
-        PreviewMouseMove+=(_,e)=>{if(ScrollableHeight>0&&e.GetPosition(this).X>=ActualWidth-12)Reveal();};
+        SizeChanged+=(_,_)=>AlignOverlayBar();
+        PreviewMouseMove+=(_,e)=>{if(ScrollableHeight>0&&Math.Abs(e.GetPosition(this).X-(ActualWidth-barInset))<=9)Reveal();};
         ScrollChanged+=(_,e)=>{if(Math.Abs(e.VerticalChange)>.01)Reveal();};
-        Unloaded+=(_,_)=>{hide.Stop();CancelWheel();fadeToken++;if(bar!=null){bar.BeginAnimation(OpacityProperty,null);bar.Opacity=0;bar.IsHitTestVisible=false;}};
+        IsVisibleChanged+=(_,_)=>{if(!IsVisible)HideOverlay();};
+        Unloaded+=(_,_)=>HideOverlay();
+    }
+    void HideOverlay()
+    {
+        hide.Stop();dragging=false;CancelWheel();fadeToken++;barOpacityTarget=0;
+        if(bar!=null){bar.BeginAnimation(OpacityProperty,null);bar.Opacity=0;bar.IsHitTestVisible=false;}
     }
     void Arm(){hide.Stop();if(!dragging&&bar?.IsMouseOver!=true)hide.Start();}
     void Reveal()
     {
-        if(bar==null||ScrollableHeight<=0)return;
-        fadeToken++;bar.IsHitTestVisible=true;bar.BeginAnimation(OpacityProperty,new DoubleAnimation(bar.IsMouseOver||dragging?.92:.66,TimeSpan.FromMilliseconds(Anim.Allowed?110:0)));Arm();
+        if(bar==null||ScrollableHeight<=0||!IsVisible)return;
+        double opacity=bar.IsMouseOver||dragging?.92:.66;
+        if(opacity!=barOpacityTarget)
+        {
+            barOpacityTarget=opacity;
+            fadeToken++;bar.IsHitTestVisible=true;
+            bar.BeginAnimation(OpacityProperty,new DoubleAnimation(opacity,TimeSpan.FromMilliseconds(Anim.Allowed?110:0)));
+        }
+        Arm();
     }
-    void CancelWheel(){wheelRevision++;var offset=VerticalOffset;SetValue(AnimatedOffsetProperty,offset);BeginAnimation(AnimatedOffsetProperty,null);wheeling=false;target=offset;}
+    void CancelWheel()
+    {
+        if(wheeling)CompositionTarget.Rendering-=RenderWheel;
+        wheeling=false;
+        target=appliedOffset=VerticalOffset;
+        lastWheelFrame=null;
+    }
+
+    void RenderWheel(object? sender,EventArgs e)
+    {
+        if(e is not RenderingEventArgs frame||lastWheelFrame==frame.RenderingTime)return;
+        lastWheelFrame=frame.RenderingTime;
+        double fraction=Math.Min(1,Stopwatch.GetElapsedTime(wheelStartTime).TotalMilliseconds/170);
+        appliedOffset=wheelStart+(target-wheelStart)*Anim.EaseOut(fraction);
+        ApplyOffset(appliedOffset);
+        if(fraction<1)return;
+        CompositionTarget.Rendering-=RenderWheel;
+        wheeling=false;
+        lastWheelFrame=null;
+    }
     protected override void OnMouseWheel(MouseWheelEventArgs e)
     {
         if(!ApplyWheel(e.Delta)){base.OnMouseWheel(e);return;}e.Handled=true;
@@ -389,11 +446,23 @@ internal sealed class SmoothScrollViewer : ScrollViewer
     internal bool ApplyWheel(int delta)
     {
         if(ScrollableHeight<=0)return false;
-        int request=++wheelRevision;
-        if(!wheeling||Math.Abs(target-VerticalOffset)>300)target=VerticalOffset;
+        wheelRevision++;
+        wheelStart=wheeling?appliedOffset:VerticalOffset;
+        if(!wheeling||Math.Abs(target-wheelStart)>300)target=wheelStart;
         target = Math.Clamp(target - delta * .85, 0, ScrollableHeight);
-        var animation=new DoubleAnimation(VerticalOffset,target,TimeSpan.FromMilliseconds(Anim.Allowed?170:0)){EasingFunction=new CubicEase{EasingMode=EasingMode.EaseOut}};
-        animation.Completed+=(_,_)=>{if(request!=wheelRevision)return;wheeling=false;SetValue(AnimatedOffsetProperty,VerticalOffset);BeginAnimation(AnimatedOffsetProperty,null);};wheeling=true;BeginAnimation(AnimatedOffsetProperty,animation);Reveal();
+        if(!Anim.Allowed){double next=target;CancelWheel();ApplyOffset(next);}
+        else if(Math.Abs(target-wheelStart)>.001)
+        {
+            wheelStartTime=Stopwatch.GetTimestamp();
+            if(!wheeling)
+            {
+                appliedOffset=VerticalOffset;
+                wheeling=true;
+                CompositionTarget.Rendering+=RenderWheel;
+            }
+        }
+        else CancelWheel();
+        Reveal();
         return true;
     }
 }

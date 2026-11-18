@@ -22,11 +22,10 @@ internal sealed class DrawerWindow : GlassWindow
     readonly TextBlock placeholder;
     readonly Dictionary<string, RadioButton> modes = new();
     readonly Dictionary<string, System.Windows.Shapes.Path> modeGlyphs = new();
-    readonly Button pinBtn, addFileBtn, closeBtn;
+    readonly Button pinBtn, addFileBtn;
     readonly StackPanel actionsPanel;
     internal Button PinButton => pinBtn;
     internal Button AddFileButton => addFileBtn;
-    internal Button CloseButton => closeBtn;
     internal StackPanel FooterActions => actionsPanel;
     bool? lastPinVisualLocked;
     bool? lastPinVisualDark;
@@ -63,6 +62,11 @@ internal sealed class DrawerWindow : GlassWindow
     }
     readonly SmoothScrollViewer scroll;
     internal SmoothScrollViewer Scroller=>scroll;
+    readonly DispatcherTimer scrollBakeIdle=new(DispatcherPriority.ApplicationIdle){Interval=TimeSpan.FromMilliseconds(280)};
+    sealed record ScrollAnchor(string[] Order,int Index,double Inset,double Offset);
+    ScrollAnchor? unfilteredAnchor,pendingAnchor;
+    string renderedQuery="";
+    bool anchorQueued;
     readonly Grid main = new();
     readonly ScaleTransform entrance=new(1,1);
     internal double EntranceScale=>entrance.ScaleX;
@@ -201,17 +205,20 @@ internal sealed class DrawerWindow : GlassWindow
     {
         prebakedDirty = true;
         prebakedBitmap = null;
-        if (scheduleIdleWarm && !deforming && !windowClosed && !prebakeQueued)
+        if (scheduleIdleWarm && !scrollBakeIdle.IsEnabled && !deforming && !windowClosed && !prebakeQueued)
         {
             prebakeQueued = true;
             Dispatcher.BeginInvoke(DispatcherPriority.ApplicationIdle, new Action(WarmPrebakedSurface));
         }
     }
 
-    internal void WarmPrebakedSurface()
+    internal void WarmPrebakedSurface()=>WarmPrebakedSurface(false);
+
+    void WarmPrebakedSurface(bool attachingMesh)
     {
         prebakeQueued = false;
-        if (deforming || windowClosed || Surface == null) return;
+        if(windowClosed||Surface==null||
+            (!attachingMesh&&(deforming||scrollBakeIdle.IsEnabled||scroll.IsScrolling)))return;
         double w = Math.Max(1, PanelWidth);
         double h = Math.Max(1, PanelHeight);
         double scale = Math.Max(1, owner.Scale);
@@ -265,7 +272,7 @@ internal sealed class DrawerWindow : GlassWindow
             Math.Abs(prebakedScale-scale)>=0.001)
         {
             prebakedDirty=true;
-            WarmPrebakedSurface();
+            WarmPrebakedSurface(attachingMesh:true);
         }
         var brush=new ImageBrush(prebakedBitmap!)
         {
@@ -335,15 +342,8 @@ internal sealed class DrawerWindow : GlassWindow
         main.RowDefinitions[4].Height = new GridLength(1, GridUnitType.Star);
         main.Margin = new Thickness(l.Chrome, l.DrawerPadTop, l.Chrome, l.DrawerPadBottom);
 
-        // Row 0: sort switch (left) + close (right)
+        // Row 0: sort and search controls.
         toolbar = new DockPanel { Height = l.ToolbarHeight };
-        closeBtn = new Button { Style = Theme.Style("IconButton"), Width = 30, Height = 30, Content = Theme.Glyph(Theme.GClose, 14, Theme.Ink, 1.7), Opacity = .8, FocusVisualStyle = null };
-        closeBtn.MouseEnter += (_, _) => closeBtn.Opacity = 1;
-        closeBtn.MouseLeave += (_, _) => closeBtn.Opacity = .8;
-        closeBtn.Click += (_, _) => { c.DrawerPinned = false; UpdatePinVisual(); c.CloseDrawer(keepDock:true,force:true); };
-        Theme.Tip(closeBtn, "关闭  Esc");
-        System.Windows.Automation.AutomationProperties.SetName(closeBtn, "关闭抽屉");
-        DockPanel.SetDock(closeBtn, Dock.Right); toolbar.Children.Add(closeBtn);
 
         var switcher = new StackPanel { Orientation = Orientation.Horizontal };
         foreach (var (name, data, tip) in new[] { ("自定义", Theme.GList, "自定义顺序 · 可拖拽排序"), ("按类型", Theme.GType, "按类型分组"), ("首字母", Theme.GAlpha, "按首字母分组") })
@@ -394,7 +394,7 @@ internal sealed class DrawerWindow : GlassWindow
         var clear=new Button{Style=Theme.Style("IconButton"),Width=26,Height=26,Content=Theme.Glyph(Theme.GClose,10,Theme.Muted),HorizontalAlignment=HorizontalAlignment.Right,Visibility=Visibility.Collapsed};
         clear.Click+=(_,_)=>search.Clear();search.TextChanged+=(_,_)=>clear.Visibility=search.Text.Length>0?Visibility.Visible:Visibility.Collapsed;Theme.Tip(clear,"清除搜索");searchHost.Children.Add(clear);search.Padding=new Thickness(0,0,30,0);
         var view=new Button{Style=Theme.Style("IconButton"),Content=Theme.Glyph(Theme.GList,15,Theme.Ink),Margin=new Thickness(8,0,0,0)};
-        System.Windows.Automation.AutomationProperties.SetName(view,"切换列表和网格");Theme.Tip(view,"列表 / 网格");view.Click+=(_,_)=>{c.Store.Data.ListView=!c.Store.Data.ListView;c.Save();Render();scroll?.ScrollToTop();};DockPanel.SetDock(view,Dock.Left);toolbar.Children.Add(view);toolbar.Children.Add(searchHost);
+        System.Windows.Automation.AutomationProperties.SetName(view,"切换列表和网格");Theme.Tip(view,"列表 / 网格");view.Click+=(_,_)=>{c.Store.Data.ListView=!c.Store.Data.ListView;c.Save();Render();};DockPanel.SetDock(view,Dock.Left);toolbar.Children.Add(view);toolbar.Children.Add(searchHost);
         gap2 = new Border { Height = 16 * l.Unit };
         Grid.SetRow(gap2, 3); main.Children.Add(gap2);
 
@@ -402,7 +402,8 @@ internal sealed class DrawerWindow : GlassWindow
         scroll = new SmoothScrollViewer
         {
             Style = Theme.Style("Overlay"),
-            Content = groups, VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
+            Content = new DrawerScrollViewport(groups), CanContentScroll = true,
+            VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
             HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled, Focusable = true, FocusVisualStyle = null,
             Padding = new Thickness(0)
         };
@@ -489,11 +490,9 @@ internal sealed class DrawerWindow : GlassWindow
             if(!a.Data.GetDataPresent("MacDock.Entry"))
             {
                 c.SetExternalFileDrag(true);
-                var files=(string[])a.Data.GetData(DataFormats.FileDrop);
-                var targetDir=c.OverrideDesktopFolder??Desktop.UserFolder;
-                bool copy=Controller.ShouldCopyToDirectory(files,targetDir,a.KeyStates);
-                bool selfLoop=!copy&&files.All(f=>string.Equals(Path.GetDirectoryName(Path.GetFullPath(f))?.TrimEnd('\\'),Path.GetFullPath(targetDir).TrimEnd('\\'),StringComparison.OrdinalIgnoreCase));
-                if(selfLoop){a.Effects=DragDropEffects.None;a.Handled=true;return;}
+                a.Effects=Controller.ImportEffect(a.KeyStates,a.AllowedEffects);
+                if(a.Effects==DragDropEffects.None){UpdateFooter();a.Handled=true;return;}
+                bool copy=a.Effects==DragDropEffects.Copy;
                 a.Effects=copy?DragDropEffects.Copy:DragDropEffects.Move;
                 ShowFileStatus(copy?"松手复制到桌面":"松手移动到桌面");
                 a.Handled=true;
@@ -517,11 +516,7 @@ internal sealed class DrawerWindow : GlassWindow
             {
                 if(!a.Data.GetDataPresent("MacDock.Entry"))
                 {
-                    var files=(string[])a.Data.GetData(DataFormats.FileDrop);
-                    var targetDir=c.OverrideDesktopFolder??Desktop.UserFolder;
-                    bool copy=Controller.ShouldCopyToDirectory(files,targetDir,a.KeyStates);
-                    bool ok=c.DropFilesToDesktop(files,copy);
-                    a.Effects=ok?(copy?DragDropEffects.Copy:DragDropEffects.Move):DragDropEffects.None;
+                    a.Effects=c.CommitExternalFileDrop(a.Data,Controller.ImportEffect(a.KeyStates,a.AllowedEffects));
                     a.Handled=true;
                     EndDesktopDrop();
                     return;
@@ -545,12 +540,13 @@ internal sealed class DrawerWindow : GlassWindow
         PreviewMouseRightButtonDown += (_, _) => Native.SuppressAppStartingCursor();
         PreviewMouseRightButtonUp += (_, _) => Native.RestoreSystemCursors();
         scroll.IsKeyboardFocusedChanged+=(_,_)=>{if(!scroll.IsKeyboardFocused)pendingFileKey=Key.None;ApplySelectionVisuals();};
-        bool marqueeActive=false;Point marqueeStart=default;
+        bool marqueeActive=false;Point marqueeStart=default;IDisposable? marqueeInteraction=null;
         static bool IsScrollBarHit(DependencyObject? d){while(d!=null){if(d is System.Windows.Controls.Primitives.ScrollBar)return true;d=d is Visual or System.Windows.Media.Media3D.Visual3D?VisualTreeHelper.GetParent(d):LogicalTreeHelper.GetParent(d);}return false;}
         void EndMarquee()
         {
             if(!marqueeActive)return;
             marqueeActive=false;
+            marqueeInteraction?.Dispose();marqueeInteraction=null;
             marqueeBox.Visibility=Visibility.Collapsed;
             if(scroll.IsMouseCaptured)scroll.ReleaseMouseCapture();
             if(selected.Count>0)FocusGrid();
@@ -563,8 +559,8 @@ internal sealed class DrawerWindow : GlassWindow
             {
                 ClearSelection(); Keyboard.ClearFocus();
                 marqueeStart=a.GetPosition(stage);
-                marqueeActive=true;
-                scroll.CaptureMouse();
+                marqueeActive=scroll.CaptureMouse();
+                if(marqueeActive)marqueeInteraction=c.HoldDrawerInteraction();
             }
         };
         scroll.PreviewMouseMove += (_, a) =>
@@ -594,6 +590,7 @@ internal sealed class DrawerWindow : GlassWindow
         };
         scroll.PreviewMouseLeftButtonUp += (_, _) => EndMarquee();
         scroll.LostMouseCapture += (_, _) => EndMarquee();
+        IsVisibleChanged+=(_,_)=>{if(!IsVisible)EndMarquee();};
         var background = new ContextMenu();
         background.Opened += (_, _) =>
         {
@@ -627,10 +624,18 @@ internal sealed class DrawerWindow : GlassWindow
             if(message==0x007B&&lp==-1&&TryKeyboardMenu())handled=true;
             return 0;
         });
-        Deactivated += (_, _) => Dispatcher.BeginInvoke(()=>c.DrawerFocusChanged());
+        Deactivated += (_, _) => c.RequestDrawerFocusCheck();
         DpiChanged += (_, _) => { InvalidateDpiCache(); InvalidatePrebakedSurface(); ApplyLayout(); Render(); if (IsVisible && !IsDeforming) RefreshMaterial(); };
         Native.DropPreviewHelper.AttachWindow(this, () => EndDesktopDrop());
-        scroll.ScrollChanged += (_, e) => { if (Math.Abs(e.VerticalChange) > 0.1) InvalidatePrebakedSurface(); };
+        scroll.ScrollChanged += (_, e) =>
+        {
+            if(Math.Abs(e.VerticalChange)<=.01)return;
+            InvalidatePrebakedSurface(scheduleIdleWarm:false);
+            scrollBakeIdle.Stop();
+            if(IsVisible&&!deforming)scrollBakeIdle.Start();
+        };
+        scrollBakeIdle.Tick+=(_,_)=>{scrollBakeIdle.Stop();c.ResumeDeferredDesktopSync();WarmPrebakedSurface();};
+        Closed+=(_,_)=>scrollBakeIdle.Stop();
         void OnThemeChanged() => InvalidatePrebakedSurface();
         Theme.Changed += OnThemeChanged;
         Closed += (_, _) => { windowClosed = true; Theme.Changed -= OnThemeChanged; };
@@ -666,6 +671,7 @@ internal sealed class DrawerWindow : GlassWindow
         var l = owner.Layout;
         if(l==appliedLayout&&owner.Scale==appliedScale)return;
         if(IsDeforming)owner.SettleDrawerMotion();
+        pendingAnchor??=CaptureScrollAnchor();
         InvalidateDpiCache();
         appliedLayout=l;appliedScale=owner.Scale;
         Width = Math.Round(l.DrawerWidth*owner.Scale)/owner.Scale+2*MaterialInset; Height = FrameHeight+2*MaterialInset;
@@ -680,11 +686,90 @@ internal sealed class DrawerWindow : GlassWindow
         searchHost.Width=Math.Clamp(PanelWidth-chrome*2-210,0,280);
         groups.Width = owner.Store.Data.ListView ? double.NaN : gridW;
         groups.HorizontalAlignment = owner.Store.Data.ListView ? HorizontalAlignment.Stretch : HorizontalAlignment.Center;
+        PlaceScrollChrome(gridW,chrome);
+        QueueAnchorRestore();
         InvalidatePrebakedSurface();
     }
 
-    public void Prepare() { ApplyLayout(); Render();scroll.ResetScroll(); }
-    internal void PrepareForOpen(){ApplyLayout();scroll.ResetScroll();WarmPrebakedSurface();}
+    void PlaceScrollChrome(double gridWidth,double chrome)
+    {
+        double inner=PanelWidth-2*chrome;
+        double contentRight=owner.Store.Data.ListView?PanelWidth-chrome-12:chrome+(inner+gridWidth)/2;
+        double axis=Math.Round((PanelWidth+contentRight)*.5*owner.Scale)/owner.Scale;
+        scroll.PlaceOverlayBar(PanelWidth-chrome-axis);
+        actionsPanel.Margin=new Thickness(0,0,PanelWidth-chrome-axis-addFileBtn.Width/2,0);
+    }
+
+    public void Prepare() { ApplyLayout(); Render(); }
+    internal void PrepareForOpen()
+    {
+        ApplyLayout();
+        RestoreScrollAnchor();
+        scrollBakeIdle.Stop();
+        WarmPrebakedSurface();
+    }
+    internal void FinishScrollForClose()
+    {
+        scroll.StopWheel();
+        scrollBakeIdle.Stop();
+    }
+
+    ScrollAnchor? CaptureScrollAnchor()
+    {
+        if(visibleOrder.Count==0||!groups.IsArrangeValid)return null;
+        var order=visibleOrder.Select(e=>e.Id).ToArray();
+        double offset=scroll.VerticalOffset;
+        double closest=double.PositiveInfinity;
+        int index=0;
+        double inset=0;
+        for(int i=0;i<order.Length;i++)
+        {
+            if(!TryTileY(order[i],out double y)||y+tiles[order[i]].ActualHeight<=0)continue;
+            if(y>=closest-.01)continue;
+            closest=y;index=i;inset=y;
+        }
+        return new ScrollAnchor(order,index,inset,offset);
+    }
+
+    bool TryTileY(string id,out double y)
+    {
+        y=0;
+        if(!tiles.TryGetValue(id,out var tile)||tile.ActualHeight<=0||!scroll.IsAncestorOf(tile))return false;
+        y=tile.TransformToAncestor(scroll).Transform(new Point()).Y;
+        return true;
+    }
+
+    void QueueAnchorRestore()
+    {
+        if(anchorQueued||pendingAnchor==null)return;
+        anchorQueued=true;
+        Dispatcher.BeginInvoke(DispatcherPriority.Loaded,new Action(()=>
+        {
+            anchorQueued=false;
+            RestoreScrollAnchor();
+        }));
+    }
+
+    void RestoreScrollAnchor()
+    {
+        if(pendingAnchor is not {} anchor||windowClosed)return;
+        pendingAnchor=null;
+        UpdateLayout();
+        double offset=anchor.Offset;
+        for(int distance=0;distance<anchor.Order.Length;distance++)
+        {
+            int next=anchor.Index+distance,prior=anchor.Index-distance;
+            if((next<anchor.Order.Length&&TryTileY(anchor.Order[next],out double y))||
+                (prior>=0&&TryTileY(anchor.Order[prior],out y)))
+            {
+                offset=scroll.VerticalOffset+y-anchor.Inset;
+                break;
+            }
+        }
+        scroll.StopWheel();
+        scroll.ScrollToVerticalOffset(Math.Clamp(offset,0,scroll.ScrollableHeight));
+        UpdateLayout();
+    }
     void UseFlatSurface()
     {
         stage.Clip=null;
@@ -951,7 +1036,7 @@ internal sealed class DrawerWindow : GlassWindow
     {
         var key=a.Key==Key.System?a.SystemKey:a.Key;
         if(a.Key==Key.Escape&&PointerSort.Active is {} sort){sort.End(false);a.Handled=true;return;}
-        if(owner.MenuOpen||owner.Busy)return; // Native menus and dialogs own their keyboard input.
+        if(owner.MenuOpen||owner.Busy||owner.DrawerInteractionActive)return;
         var ctrl = Keyboard.Modifiers.HasFlag(ModifierKeys.Control);
         var shift = Keyboard.Modifiers.HasFlag(ModifierKeys.Shift);
         if (a.Key == Key.Escape)
@@ -995,15 +1080,22 @@ internal sealed class DrawerWindow : GlassWindow
 
     // ---------------------------------------------------------------- rendering
     internal IReadOnlyList<FrameworkElement> SortTiles(bool manual)=>visibleOrder.Where(e=>(e.Source=="manual")==manual).Where(e=>tiles.ContainsKey(e.Id)).Select(e=>(FrameworkElement)tiles[e.Id]).ToArray();
-    internal void ApplyCustomOrder(){var offset=scroll.VerticalOffset;Render();groups.BeginAnimation(OpacityProperty,null);groups.Opacity=1;scroll.ScrollToVerticalOffset(offset);}
+    internal void ApplyCustomOrder(){Render();groups.BeginAnimation(OpacityProperty,null);groups.Opacity=1;}
     public void Render()
     {
-        double savedOffset=scroll.VerticalOffset;
+        var current= pendingAnchor??CaptureScrollAnchor();
         UpdateModeVisuals();
         if (Surface is Border card) card.CornerRadius = new CornerRadius(MaterialRadius);
         dropTargetTile = null; DropTargetEntry = null;
         var l = owner.Layout;
         var q = search.Text.Trim();
+        if(!string.Equals(q,renderedQuery,StringComparison.Ordinal))
+        {
+            if(renderedQuery.Length==0)unfilteredAnchor=current;
+            pendingAnchor=q.Length==0?unfilteredAnchor:new ScrollAnchor(Array.Empty<string>(),0,0,0);
+            renderedQuery=q;
+        }
+        else pendingAnchor=current;
         bool listView = owner.Store.Data.ListView;
         var entries = owner.Store.Data.Entries.Where(e => e.InDrawer && (q.Length == 0 || e.Name.Contains(q, StringComparison.CurrentCultureIgnoreCase) || e.Path.Contains(q, StringComparison.CurrentCultureIgnoreCase))).ToList();
         var organized = Alphabet.Groups(entries.Where(e => e.Source != "manual"), owner.Store.Data.Mode).Select(g => (Key: "auto:" + g.Key, Title: g.Key, Items: g.ToArray()))
@@ -1199,7 +1291,8 @@ internal sealed class DrawerWindow : GlassWindow
         }
 
         ApplySelectionVisuals();
-        scroll.ScrollToVerticalOffset(savedOffset);
+        PlaceScrollChrome(gridW,GridMetrics(l).Chrome);
+        QueueAnchorRestore();
         if (!IsVisible && meshAttached) Surface?.InvalidateVisual();
         groups.BeginAnimation(OpacityProperty, null);
         groups.Opacity = 1;

@@ -302,11 +302,6 @@ internal static partial class Native
         }
         return new IconCacheKey(path.ToUpperInvariant(), ticks, length, Math.Clamp(pixels, 32, 256), IconResources.Stamp(path));
     }
-    internal static ImageSource? TryGetCachedIcon(string path, int pixels)
-    {
-        if (string.IsNullOrWhiteSpace(path)) return null;
-        return imageCache.TryGetValue(MakeIconCacheKey(path, pixels), out var cached) ? cached : null;
-    }
     internal static void ClearIconCache(string? path = null)
     {
         if (path == null) { imageCache.Clear(); return; }
