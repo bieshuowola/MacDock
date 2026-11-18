@@ -214,18 +214,22 @@ internal static class Tests
             Check("This PC CLSID icon resolved",Native.Icon("::{20D04FE0-3AEA-1069-A2D8-08002B30309D}",64)!=null);
             Check("StockIcon fallback resolved",Native.StockIcon(Environment.ProcessPath!,64)!=null);
 
-            // 1.9.8: DoubleClickToOpen & SuppressWakeKey defaults, clamping and persistence; key/maximized helpers.
+            // Wake bindings are opt-in. Old unsupported key values should load unbound.
             var defaultCfg=new Store(Path.Combine(root,"cfg-defaults")).Data;
             Check("DoubleClickToOpen defaults to false",!defaultCfg.DoubleClickToOpen);
             Check("SuppressWakeKey defaults to zero",defaultCfg.SuppressWakeKey==0);
             var cfgDir=Path.Combine(root,"cfg-198");
             var cfgStore=new Store(cfgDir);
             cfgStore.Data.DoubleClickToOpen=true;
-            cfgStore.Data.SuppressWakeKey=999;
+            cfgStore.Data.SuppressWakeKey=0x91;
             cfgStore.SaveSettings();
             var cfgReload=new Store(cfgDir);
-            Check("1.9.8 settings persist and clamp wake key",cfgReload.Data.DoubleClickToOpen&&cfgReload.Data.SuppressWakeKey==254);
-            Check("SuppressWakeKey labels valid",Native.KeyName(0)=="未设置"&&Native.KeyName(0x11)=="Ctrl");
+            Check("valid custom wake binding persists",cfgReload.Data.DoubleClickToOpen&&cfgReload.Data.SuppressWakeKey==0x91);
+            cfgReload.Data.SuppressWakeKey=0x13;cfgReload.Data.WakeDisabled=true;cfgReload.SaveSettings();
+            var unsupportedWake=new Store(cfgDir).Data;
+            Check("unsupported legacy wake key recovers to unbound",unsupportedWake.SuppressWakeKey==0&&!unsupportedWake.WakeDisabled&&
+                !Native.IsWakeBindingKey(0x03)&&!Native.IsWakeBindingKey(0xE7)&&!Native.IsWakeBindingKey(0x11));
+            Check("SuppressWakeKey labels valid",Native.KeyName(0)=="待绑定"&&Native.KeyName(0x11)=="Ctrl");
             _ = Native.HasMaximizedWindow(System.Windows.Forms.Screen.PrimaryScreen!);
             Check("ShellDrop recognizes executable targets",ShellDrop.IsExecutableTarget(Environment.ProcessPath!));
             var dummyBat=Path.Combine(root,"tool.bat");File.WriteAllText(dummyBat,"@echo off");

@@ -97,7 +97,7 @@ internal static class Dialogs
         clearKey.Margin=new Thickness(6,0,0,0);clearKey.Effect=null;clearKey.FocusVisualStyle=null;
         void RefreshSuppressButtons()
         {
-            bindKey.Content=recordingKey?"请按下任意键…":Native.KeyName(data.SuppressWakeKey);
+            bindKey.Content=recordingKey?"请按下单键…":Native.KeyName(data.SuppressWakeKey);
             clearKey.IsEnabled=!recordingKey&&data.SuppressWakeKey!=0;
         }
         RefreshSuppressButtons();
@@ -111,18 +111,20 @@ internal static class Dialogs
             a.Handled=true;
             var key=a.Key==Key.System?a.SystemKey:a.Key;
             if(key==Key.Escape){recordingKey=false;RefreshSuppressButtons();return;}
+            if(a.IsRepeat)return;
             int vk=KeyInterop.VirtualKeyFromKey(key);
-            if(vk is 0xA0 or 0xA1)vk=0x10;
-            else if(vk is 0xA2 or 0xA3)vk=0x11;
-            else if(vk is 0xA4 or 0xA5)vk=0x12;
-            if(vk is <=0 or >254)return;
-            recordingKey=false;
-            c.SetSuppressWakeKey(vk);
+            if(Keyboard.Modifiers!=ModifierKeys.None||!Native.IsWakeBindingKey(vk))
+            {
+                bindKey.Content="不支持此键，请重试";
+                return;
+            }
+            if(c.SetSuppressWakeKey(vk))recordingKey=false;
             RefreshSuppressButtons();
         };
         var openModeRow=Row("抽屉图标打开方式",openMode);
         var suppressRow=Row("按键切换 Dock 唤出",suppressPanel);
         System.Windows.Automation.AutomationProperties.SetName(bindKey,"按键切换 Dock 唤出");
+        Theme.Tip(bindKey,"只支持单键。Pause/Break、修饰键、输入法键及系统键不可绑定。所选按键仍照常传给前台应用。");
         System.Windows.Automation.AutomationProperties.SetName(clearKey,"清除屏蔽唤醒按键");
         Group("常规",Row("开机自启动",startup),Row("减少动画效果",motion),openModeRow,suppressRow);
 

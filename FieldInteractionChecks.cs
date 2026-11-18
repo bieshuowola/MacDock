@@ -12,7 +12,6 @@ namespace MacDock;
 
 internal static class FieldInteractionChecks
 {
-    [DllImport("user32.dll")] static extern nint GetShellWindow();
     [DllImport("user32.dll",CharSet=CharSet.Unicode)] static extern nint FindWindow(string name,string? title);
 
     static IEnumerable<T> Elements<T>(DependencyObject root) where T:DependencyObject
@@ -362,23 +361,23 @@ internal static class FieldInteractionChecks
             c.CloseDrawer(force:true);await Until(()=>!drawer.IsVisible);
             await Move(outside);c.Collapse();await Until(()=>!c.Dock.IsVisible);
 
-            c.SetSuppressWakeKey(Native.GraveWakeKey);
-            Native.SetForegroundWindow(GetShellWindow());await Until(Native.DesktopSearchHasFocus);
-            void Grave(bool down)=>Native.TestKey(Native.GraveWakeKey,down,scan:0x29);
-            Grave(true);
+            c.SetSuppressWakeKey(0x77);
+            await Until(()=>c.WakeKeyListening);
+            void WakeKey(bool down)=>Native.TestKey(0x77,down,scan:0x42);
+            WakeKey(true);
             try
             {
                 await Move(wakePoint);
-                for(int i=0;i<5;i++){Grave(true);await Task.Delay(90);}
-                Check("Desktop grave down and repeats withheld, wake remains suppressed",
-                    c.WakeSuppressedByKey&&!Native.KeyHeld(Native.GraveWakeKey)&&!c.Dock.IsVisible);
+                for(int i=0;i<5;i++){WakeKey(true);await Task.Delay(90);}
+                Check("Desktop key remains delivered during a held toggle",
+                    c.WakeSuppressedByKey&&Native.KeyHeld(0x77)&&!c.Dock.IsVisible);
             }
-            finally{Grave(false);}
+            finally{WakeKey(false);}
             await Move(outside);await Move(wakePoint);await Task.Delay(350);
             Check("Release leaves wake disabled and persists the configured binding",
                 c.WakeSuppressedByKey&&!c.Dock.IsVisible&&new Store(Path.GetDirectoryName(c.Store.FilePath)).Data is
-                    {WakeDisabled:true,SuppressWakeKey:Native.GraveWakeKey});
-            Grave(true);Grave(false);
+                    {WakeDisabled:true,SuppressWakeKey:0x77});
+            WakeKey(true);WakeKey(false);
             await Until(()=>!c.WakeSuppressedByKey);
             await Move(outside);await Move(wakePoint);await Until(()=>c.Dock.IsVisible);
             Check("A second press restores wake",!c.WakeSuppressedByKey);
@@ -391,9 +390,10 @@ internal static class FieldInteractionChecks
                 var key=e.Key==System.Windows.Input.Key.ImeProcessed?e.ImeProcessedKey:e.Key;
                 textKeys.Add(key.ToString());
             }),true);
-            Grave(true);await Task.Delay(100);
-            bool delivered=Native.KeyHeld(Native.GraveWakeKey);
-            Grave(false);
+            c.SetSuppressWakeKey(0xC0);
+            Native.TestKey(0xC0,true,scan:0x29);await Task.Delay(100);
+            bool delivered=Native.KeyHeld(0xC0);
+            Native.TestKey(0xC0,false,scan:0x29);
             Check("Bound grave still reaches the drawer search field without toggling",delivered&&drawer.TextInputActive&&
                 textKeys.Contains("Oem3")&&!c.WakeSuppressedByKey,new{delivered,textKeys});
             c.CloseDrawer(force:true);await Until(()=>!drawer.IsVisible);
@@ -484,7 +484,8 @@ internal static class FieldInteractionChecks
         {
             if(shellPopupOpened)Key(0x1B);
             foreach(var fixture in thumbnailFixtures)fixture.Close();
-            Native.TestKey(Native.GraveWakeKey,false,scan:0x29);
+            Native.TestKey(0xC0,false,scan:0x29);
+            Native.TestKey(0x77,false,scan:0x42);
             Native.TestKey(0x10,false);
             Native.TestButton(false);Native.TestRightButton(false);
             Native.SetCursorPos(original.X,original.Y);

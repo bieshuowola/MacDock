@@ -86,15 +86,19 @@ internal static class SettingsReleaseChecks
                     Check("open mode single-click restores immediately",!new Store(Path.GetDirectoryName(c.Store.FilePath)).Data.DoubleClickToOpen);
                     var bindKey=Named<Button>("按键切换 Dock 唤出");
                     var clearKey=Named<Button>("清除屏蔽唤醒按键");
-                    Check("suppress wake key starts unbound",!clearKey.IsEnabled&&c.Store.Data.SuppressWakeKey==0);
+                    Check("suppress wake key starts unbound",!clearKey.IsEnabled&&c.Store.Data.SuppressWakeKey==0&&(string?)bindKey.Content=="待绑定");
                     Press(bindKey);
                     Check("suppress wake key enters recording prompt",(bindKey.Content as string)?.Contains("请按")==true);
                     if(PresentationSource.FromVisual(w) is PresentationSource ps)
                     {
-                        w.RaiseEvent(new System.Windows.Input.KeyEventArgs(System.Windows.Input.Keyboard.PrimaryDevice,ps,0,System.Windows.Input.Key.F8){RoutedEvent=System.Windows.Input.Keyboard.PreviewKeyDownEvent});
+                        void Record(System.Windows.Input.Key key)=>w.RaiseEvent(new System.Windows.Input.KeyEventArgs(
+                            System.Windows.Input.Keyboard.PrimaryDevice,ps,0,key){RoutedEvent=System.Windows.Input.Keyboard.PreviewKeyDownEvent});
+                        Record(System.Windows.Input.Key.Pause);
+                        Check("Pause is rejected without setting a binding",c.Store.Data.SuppressWakeKey==0&&(string?)bindKey.Content=="不支持此键，请重试");
+                        Record(System.Windows.Input.Key.F8);
                         Check("suppress wake key records and persists",new Store(Path.GetDirectoryName(c.Store.FilePath)).Data.SuppressWakeKey==0x77&&clearKey.IsEnabled);
                         Press(clearKey);
-                        Check("suppress wake key clears and persists",new Store(Path.GetDirectoryName(c.Store.FilePath)).Data.SuppressWakeKey==0&&!clearKey.IsEnabled);
+                        Check("suppress wake key clears and persists",new Store(Path.GetDirectoryName(c.Store.FilePath)).Data.SuppressWakeKey==0&&!clearKey.IsEnabled&&(string?)bindKey.Content=="待绑定");
                     }
                     using var bitmap=new System.Drawing.Bitmap((int)Math.Ceiling(w.ActualWidth*c.Scale),(int)Math.Ceiling(w.ActualHeight*c.Scale));
                     var point=w.PointToScreen(new Point());

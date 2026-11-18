@@ -21,6 +21,7 @@ internal static class Program
         Forms.Application.SetHighDpiMode(Forms.HighDpiMode.PerMonitorV2);
 #if MACDOCK_EXPERIENCE_CHECKS
         if(args.Length>1&&args[0]=="--maintenance-fixture")return FieldInteractionChecks.Fixture(args);
+        if(args.Length==3&&args[0]=="--wake-input-fixture")return WakeBindingChecks.InputFixture(args[1],args[2]);
 #endif
         if(args.Contains("--game-fixture"))return GameWakeChecks.Fixture(args[Array.IndexOf(args,"--game-fixture")+1]);
         if(args.Contains("--external-fixture"))return ExternalGlassChecks.Fixture(args[Array.IndexOf(args,"--external-fixture")+1]);
@@ -84,6 +85,7 @@ internal static class Program
                 bool drawerPasteReuse = false;
                 bool dockStability = false;
                 bool fieldInteraction = false;
+                bool wakeBindingCheck = false;
 #if MACDOCK_EXPERIENCE_CHECKS
                 productPreview = args.Contains("--product-preview");
                 dragE2E = args.Contains("--drag-e2e-test");
@@ -91,9 +93,10 @@ internal static class Program
                 drawerStability = args.Contains("--drawer-stability-test");
                 dockStability = args.Contains("--dock-stability-test");
                 fieldInteraction = args.Contains("--field-interaction-test");
+                wakeBindingCheck = args.Contains("--wake-binding-test");
                 testing|=args.Contains("--genie-idle-check");
                 drawerPasteReuse = args.Contains("--drawer-paste-reuse-test");
-                testing|=args.Contains("--experience-test")||productPreview||dragE2E||externalDropPin||drawerStability||dockStability||drawerPasteReuse||fieldInteraction||args.Contains("--update-ui-test")||args.Contains("--icon-sync-test");
+                testing|=args.Contains("--experience-test")||productPreview||dragE2E||externalDropPin||drawerStability||dockStability||drawerPasteReuse||fieldInteraction||wakeBindingCheck||args.Contains("--update-ui-test")||args.Contains("--icon-sync-test");
 #endif
 #if MACDOCK_EXPERIENCE_CHECKS
                 if(testing&&Environment.GetEnvironmentVariable("MACDOCK_QA_SOFTWARE_RENDER")=="1")
@@ -105,7 +108,7 @@ internal static class Program
                     try{File.Delete(Path.Combine(testProfile,"last-session.json"));}catch{}
                 }
                 bool arrangementChecks=args.Contains("--cross-pin-test")||args.Contains("--sorting-test");
-                c=new Controller(testProfile,autoHide:testing,skipDesktop:productPreview||dragE2E||externalDropPin||drawerStability||dockStability||drawerPasteReuse||fieldInteraction||arrangementChecks);
+                c=new Controller(testProfile,autoHide:testing,skipDesktop:productPreview||dragE2E||externalDropPin||drawerStability||dockStability||drawerPasteReuse||fieldInteraction||wakeBindingCheck||arrangementChecks);
                 if(arrangementChecks)SortingChecks.UseFixtureDesktop(c,args.Contains("--verify-restart"));
                 c.RecordSession(args,testing);
                 if(args.Contains("--first-run-test"))app.Dispatcher.BeginInvoke(DispatcherPriority.Normal,()=>{_=FirstRunChecks.Run(c);});
@@ -113,6 +116,7 @@ internal static class Program
 #if MACDOCK_EXPERIENCE_CHECKS
                 if(args.Contains("--genie-idle-check"))app.Dispatcher.BeginInvoke(DispatcherPriority.Normal,()=>{_=GenieIdleChecks.Run(c);});
                 if(fieldInteraction)app.Dispatcher.BeginInvoke(DispatcherPriority.Normal,()=>{_=FieldInteractionChecks.Run(c);});
+                if(wakeBindingCheck)app.Dispatcher.BeginInvoke(DispatcherPriority.ApplicationIdle,()=>{_=WakeBindingChecks.Run(c);});
                 if(args.Contains("--experience-test"))app.Dispatcher.BeginInvoke(DispatcherPriority.Normal,()=>{_=ExperienceChecks.Run(c);});
                 if(args.Contains("--product-preview"))app.Dispatcher.BeginInvoke(DispatcherPriority.Normal,()=>{_=ExperienceChecks.Capture(c);});
                 if(args.Contains("--drag-e2e-test"))app.Dispatcher.BeginInvoke(DispatcherPriority.Normal,()=>{_=ExperienceChecks.DragE2E(c);});
@@ -197,6 +201,7 @@ internal sealed class Controller : IDisposable
     public Layout Layout => new(WorkArea.Width/Scale,WorkArea.Height/Scale,Store.Data.DockCapacity,Store.Data.DrawerRows,Store.Data.DrawerColumns,DesktopView.IconSizeDip);
     internal bool AutoHideDock { get; set; }
     internal int SuppressWakeKey => Store.Data.SuppressWakeKey;
+    internal bool WakeKeyListening => hook?.WakeKeyListening==true;
     volatile bool wakeDisabled;
     internal bool WakeSuppressedByKey => wakeDisabled;
     internal static bool ShouldSuppressDockByKey(bool wakeSuppressedByKey,bool menuOpen,bool busy,bool internalDragging,bool drawerVisible)=>
@@ -645,7 +650,7 @@ internal sealed class Controller : IDisposable
 
     internal bool SetSuppressWakeKey(int vk)
     {
-        vk=Math.Clamp(vk,0,254);
+        if(vk!=0&&!Native.IsWakeBindingKey(vk))return false;
         var data=Store.Data;
         if(!SaveSetting(()=>(data.SuppressWakeKey,data.WakeDisabled),
             value=>(data.SuppressWakeKey,data.WakeDisabled)=value,(vk,vk!=0&&data.WakeDisabled)))return false;

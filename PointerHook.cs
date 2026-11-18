@@ -19,15 +19,21 @@ internal sealed class PointerHook : IDisposable
     nint keyHook;
     readonly Action<int>? wakePressed;
     volatile int wakeKey;
-    int heldWakeKey;
-    bool consumedGrave;
+    const uint WakeBindingChanged=0x8001;
     internal static int Installations;
     internal static bool AuditInput;
     internal static long NonInjectedInputs;
     volatile bool disposed;
 
     public bool Available => hook != 0;
-    internal void SetWakeKey(int key) => wakeKey=key;
+    internal bool WakeKeyListening => Volatile.Read(ref keyHook)!=0;
+    internal void SetWakeKey(int key)
+    {
+        if(wakeKey==key)return;
+        wakeKey=key;
+        uint owner=threadId;
+        if(owner!=0)Native.PostThreadMessage(owner,WakeBindingChanged,0,0);
+    }
 
     public PointerHook(Action<Native.Point,bool> handler,Func<Native.Point,uint,uint,bool>? filter=null,int wakeKey=0,Action<int>? wakePressed=null)
     {
@@ -36,23 +42,27 @@ internal sealed class PointerHook : IDisposable
         this.wakeKey=wakeKey;
         this.wakePressed=wakePressed;
         proc = Callback;
-        keyProc = FilterWakeKey;
+        keyProc = ObserveWakeKey;
         var ready = new ManualResetEventSlim();
         thread = new Thread(() =>
         {
             threadId = Native.GetCurrentThreadId();
             Native.PeekMessage(out _, 0, 0, 0, 0); // force a message queue before installing the hook
             hook = Native.SetWindowsHookEx(14, proc, Native.GetModuleHandle(null), 0);
-            if(wakePressed!=null)keyHook=Native.SetWindowsHookEx(13,keyProc,Native.GetModuleHandle(null),0);
+            UpdateWakeListener();
             Interlocked.Increment(ref Installations);
             ready.Set();
             while (!disposed && Native.GetMessage(out var message, 0, 0, 0) > 0)
             {
-                Native.TranslateMessage(ref message);
-                Native.DispatchMessage(ref message);
+                if(message.hwnd==0&&message.message==WakeBindingChanged)UpdateWakeListener();
+                else
+                {
+                    Native.TranslateMessage(ref message);
+                    Native.DispatchMessage(ref message);
+                }
             }
             if (hook != 0) { Native.UnhookWindowsHookEx(hook); hook = 0; }
-            if (keyHook != 0) { Native.UnhookWindowsHookEx(keyHook); keyHook = 0; }
+            RemoveWakeListener();
         })
         { IsBackground = true, Priority = ThreadPriority.BelowNormal, Name = "MacDock pointer hook" };
         thread.SetApartmentState(ApartmentState.STA);
@@ -60,34 +70,41 @@ internal sealed class PointerHook : IDisposable
         ready.Wait(2000);
     }
 
-    nint FilterWakeKey(int code,nint message,nint data)
+    void UpdateWakeListener()
     {
-        if(code<0||disposed)return Native.CallNextHookEx(keyHook,code,message,data);
-        var input=Marshal.PtrToStructure<Native.LowLevelKey>(data);
-        int physical=(int)input.VirtualKey;
-        int generic=physical switch {0xA0 or 0xA1=>0x10,0xA2 or 0xA3=>0x11,0xA4 or 0xA5=>0x12,_=>physical};
-        int binding=wakeKey;
-        if(message is 0x101 or 0x105)
+        if(!disposed&&wakePressed!=null&&wakeKey!=0)
         {
-            if(physical==heldWakeKey)heldWakeKey=0;
-            if(physical==Native.GraveWakeKey&&consumedGrave){consumedGrave=false;return 1;}
+            if(keyHook==0)
+                Volatile.Write(ref keyHook,Native.SetWindowsHookEx(13,keyProc,Native.GetModuleHandle(null),0));
         }
-        else if(message is 0x100 or 0x104)
+        else RemoveWakeListener();
+    }
+
+    void RemoveWakeListener()
+    {
+        nint listener=Interlocked.Exchange(ref keyHook,0);
+        if(listener!=0)Native.UnhookWindowsHookEx(listener);
+    }
+
+    nint ObserveWakeKey(int code,nint message,nint data)
+    {
+        if(code==0&&!disposed&&message is 0x0100 or 0x0104)
         {
-            if(physical==Native.GraveWakeKey&&consumedGrave)return 1;
-            // The async state still reflects the preceding event inside WH_KEYBOARD_LL.
-            if((binding==physical||binding==generic)&&heldWakeKey!=physical&&!Native.KeyHeld(binding))
+            int binding=wakeKey;
+            try
             {
-                heldWakeKey=physical;
-                if(binding==Native.GraveWakeKey&&input.Scan==0x29&&message==0x100&&
+                // vkCode is the first DWORD of KBDLLHOOKSTRUCT. Windows updates its async
+                // key state after this callback, so an already-down key is an auto-repeat.
+                // Rely on Windows for that previous state instead of owning a key-up latch.
+                if(binding!=0&&Marshal.ReadInt32(data)==binding&&(Marshal.ReadInt32(data,8)&0x20)==0&&
+                    !Native.KeyHeld(binding)&&
                     !Native.KeyHeld(0x10)&&!Native.KeyHeld(0x11)&&!Native.KeyHeld(0x12)&&
-                    !Native.KeyHeld(0x5B)&&!Native.KeyHeld(0x5C)&&Native.DesktopSearchHasFocus())
-                    consumedGrave=true;
-                try{wakePressed?.Invoke(binding);}catch(InvalidOperationException){}
-                if(consumedGrave)return 1;
+                    !Native.KeyHeld(0x5B)&&!Native.KeyHeld(0x5C))
+                    wakePressed?.Invoke(binding);
             }
+            catch { /* A Dock callback failure must still forward the original input. */ }
         }
-        return Native.CallNextHookEx(keyHook,code,message,data);
+        return Native.CallNextHookEx(0,code,message,data);
     }
 
     nint Callback(int code, nint wp, nint lp)

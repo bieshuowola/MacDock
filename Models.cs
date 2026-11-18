@@ -116,7 +116,7 @@ public sealed class Store
         c.DockOrder??=new();
         if (!new[] { "自定义", "按类型", "首字母" }.Contains(c.Mode)) c.Mode = "自定义";
         if(!new[]{"system","light","dark"}.Contains(c.Appearance))c.Appearance="system";
-        c.SuppressWakeKey=Math.Clamp(c.SuppressWakeKey,0,254);
+        if(!Native.IsWakeBindingKey(c.SuppressWakeKey))c.SuppressWakeKey=0;
         if(c.SuppressWakeKey==0)c.WakeDisabled=false;
         c.DockCapacity=Math.Clamp(c.DockCapacity,0,18);c.DrawerRows=Math.Clamp(c.DrawerRows,0,8);c.DrawerColumns=Math.Clamp(c.DrawerColumns,0,12);
         if (c.Version < 3) { if(!File.Exists(p+".before-v3"))File.Copy(p,p+".before-v3");Migrate(c); }

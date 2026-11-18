@@ -14,7 +14,6 @@ internal static partial class Native
     [StructLayout(LayoutKind.Sequential)] internal struct Point { public int X,Y; public Point(int x,int y) { X=x;Y=y; } }
     [StructLayout(LayoutKind.Sequential)] internal struct Rect { public int Left,Top,Right,Bottom; public bool Contains(Point p) => p.X>=Left && p.X<Right && p.Y>=Top && p.Y<Bottom; }
     [StructLayout(LayoutKind.Sequential)] internal struct Mouse { public Point Pt; public uint Data,Flags,Time; public nint Extra; }
-    [StructLayout(LayoutKind.Sequential)] internal struct LowLevelKey { public uint VirtualKey,Scan,Flags,Time; public nuint Extra; }
     internal delegate nint MouseProc(int code, nint wp, nint lp);
     internal delegate void EventProc(nint hook,uint evt,nint hwnd,int obj,int child,uint thread,uint time);
     internal delegate bool EnumProc(nint hwnd,nint data);
@@ -711,17 +710,12 @@ internal static partial class Native
         var cls=Class(info.hwndFocus);
         return cls.Equals("Edit",StringComparison.OrdinalIgnoreCase)||cls.StartsWith("RichEdit",StringComparison.OrdinalIgnoreCase);
     }
-    internal const int GraveWakeKey = 0xC0;
-    internal static bool DesktopSearchHasFocus()
-    {
-        var foreground=GetForegroundWindow();
-        if(Class(foreground) is not ("Progman" or "WorkerW"))return false;
-        uint thread=GetWindowThreadProcessId(foreground,out var process);
-        if(thread==0||process!=ShellProcess())return false;
-        var info=new GUITHREADINFO{cbSize=Marshal.SizeOf<GUITHREADINFO>()};
-        return GetGUIThreadInfo(thread,ref info) && info.hwndMenuOwner==0 &&
-            Class(info.hwndFocus) is "SHELLDLL_DefView" or "SysListView32";
-    }
+    // Keys with ordinary make/break events. Escape stays reserved for cancelling
+    // recording. Modifier, IME, system/media and special scan sequences are excluded.
+    internal static bool IsWakeBindingKey(int key) => key is
+        0x08 or 0x09 or 0x0D or >=0x20 and <=0x28 or 0x2D or 0x2E or
+        >=0x30 and <=0x39 or >=0x41 and <=0x5A or >=0x60 and <=0x87 or
+        0x91 or >=0xBA and <=0xC0 or >=0xDB and <=0xDF or 0xE2;
     internal static bool KeyHeld(int vk)
     {
         if(vk<=0)return false;
@@ -736,7 +730,7 @@ internal static partial class Native
     }
     internal static string KeyName(int vk)
     {
-        if(vk<=0)return "未设置";
+        if(vk<=0)return "待绑定";
         return vk switch
         {
             0x10 or 0xA0 or 0xA1=>"Shift",
@@ -745,6 +739,7 @@ internal static partial class Native
             0x5B or 0x5C=>"Win",
             0x14=>"CapsLock",
             0x20=>"Space",
+            0x91=>"Scroll Lock",
             0xC0=>"~",
             _=>System.Windows.Input.KeyInterop.KeyFromVirtualKey(vk) is var key&&key!=System.Windows.Input.Key.None?key.ToString():$"VK_{vk:X2}"
         };
