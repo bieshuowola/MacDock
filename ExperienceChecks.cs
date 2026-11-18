@@ -1359,6 +1359,170 @@ internal static class ExperienceChecks
         protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request,CancellationToken token)=>reply(request.RequestUri!);
     }
 
+    static void WriteSolidIco(string path, Color color)
+    {
+        int size = 48;
+        int andStride = ((size + 31) / 32) * 4;
+        int imgSize = 40 + size * size * 4 + andStride * size;
+        using var bw = new BinaryWriter(File.Create(path));
+        bw.Write((ushort)0); bw.Write((ushort)1); bw.Write((ushort)1);
+        bw.Write((byte)size); bw.Write((byte)size); bw.Write((byte)0); bw.Write((byte)0);
+        bw.Write((ushort)1); bw.Write((ushort)32); bw.Write(imgSize); bw.Write(22);
+        bw.Write(40); bw.Write(size); bw.Write(size * 2); bw.Write((ushort)1); bw.Write((ushort)32);
+        bw.Write(0); bw.Write(size * size * 4); bw.Write(0); bw.Write(0); bw.Write(0); bw.Write(0);
+        for (int i = 0; i < size * size; i++) { bw.Write(color.B); bw.Write(color.G); bw.Write(color.R); bw.Write((byte)255); }
+        bw.Write(new byte[andStride * size]);
+    }
+
+    [System.Runtime.InteropServices.DllImport("shell32.dll")]
+    static extern void SHChangeNotify(int eventId, uint flags, nint item1, nint item2);
+
+    internal static async Task IconSync(Controller c)
+    {
+        var checks = new List<object>();
+        bool Check(string name, bool pass, object? detail = null) { checks.Add(new { name, pass, detail }); return pass; }
+        string prefix = "MDIS" + Guid.NewGuid().ToString("N")[..8];
+        string desktop = Desktop.UserFolder;
+        string txtPath = Path.Combine(desktop, $"{prefix}-sample.txt");
+        string vbsPath = Path.Combine(desktop, $"{prefix}-sample.vbs");
+        string keepPath = Path.Combine(desktop, $"{prefix}-keep.txt");
+        string lnkPath = Path.Combine(desktop, $"{prefix}-link.lnk");
+        string dirPath = Path.Combine(desktop, $"{prefix}-folder");
+        string icoA = Path.Combine(Output, $"{prefix}-a.ico");
+        string icoB = Path.Combine(Output, $"{prefix}-b.ico");
+        bool allPass = false;
+        using var watchdog = new System.Threading.Timer(_ =>
+        {
+            try { File.WriteAllText(Path.Combine(Output, "icon-sync-result.json"), JsonSerializer.Serialize(new { pass = false, detail = "TIMEOUT(20s)", checks }, new JsonSerializerOptions { WriteIndented = true })); } catch { }
+            Environment.Exit(1);
+        }, null, 20000, Timeout.Infinite);
+
+        ImageSource? TileIconSource(DrawerWindow d, string p)
+        {
+            var tile = d.TileControlForPath(p);
+            if (tile == null) return null;
+            Image? FindImg(DependencyObject obj)
+            {
+                if (obj is Image img) return img;
+                for (int i = 0; i < VisualTreeHelper.GetChildrenCount(obj); i++)
+                    if (FindImg(VisualTreeHelper.GetChild(obj, i)) is Image found) return found;
+                return null;
+            }
+            return FindImg(tile)?.Source;
+        }
+
+        void SetShortcutIcon(string linkFile, string targetFile, string iconLoc)
+        {
+            object? sh = null, lnk = null;
+            try
+            {
+                sh = Activator.CreateInstance(Type.GetTypeFromProgID("WScript.Shell")!);
+                lnk = ((dynamic)sh!).CreateShortcut(linkFile);
+                ((dynamic)lnk).TargetPath = targetFile;
+                ((dynamic)lnk).IconLocation = iconLoc;
+                ((dynamic)lnk).Save();
+            }
+            finally
+            {
+                if (lnk != null) System.Runtime.InteropServices.Marshal.ReleaseComObject(lnk);
+                if (sh != null) System.Runtime.InteropServices.Marshal.ReleaseComObject(sh);
+            }
+        }
+
+        try
+        {
+            Directory.CreateDirectory(Output);
+            WriteSolidIco(icoA, Colors.Red);
+            WriteSolidIco(icoB, Colors.DodgerBlue);
+            File.WriteAllText(txtPath, "hello");
+            File.WriteAllText(keepPath, "keep");
+            Directory.CreateDirectory(dirPath);
+            SetShortcutIcon(lnkPath, Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Windows), @"System32\notepad.exe"), icoA + ",0");
+
+            for (int w = 0; w < 35; w++)
+            {
+                if (c.Store.Data.Entries.Any(e => string.Equals(e.Path, txtPath, StringComparison.OrdinalIgnoreCase)) &&
+                    c.Store.Data.Entries.Any(e => string.Equals(e.Path, lnkPath, StringComparison.OrdinalIgnoreCase)) &&
+                    c.Store.Data.Entries.Any(e => string.Equals(e.Path, dirPath, StringComparison.OrdinalIgnoreCase)))
+                    break;
+                await Task.Delay(120);
+            }
+            c.ToggleDrawer();
+            for (int w = 0; w < 40 && (c.Drawer?.IsVisible != true || c.DrawerMotionRunning); w++) await Task.Delay(30);
+            var drawer = c.Drawer!;
+            for (int w = 0; w < 30 && (TileIconSource(drawer, txtPath) == null || TileIconSource(drawer, lnkPath) == null || TileIconSource(drawer, dirPath) == null); w++)
+                await Task.Delay(80);
+
+            var txtImgBefore = TileIconSource(drawer, txtPath);
+            var keepImgBefore = TileIconSource(drawer, keepPath);
+            var lnkImgBefore = TileIconSource(drawer, lnkPath);
+            var dirImgBefore = TileIconSource(drawer, dirPath);
+            Check("initial desktop items rendered with icons", txtImgBefore != null && keepImgBefore != null && lnkImgBefore != null && dirImgBefore != null);
+
+            // 1. Real File.Move (.txt -> .vbs) handled automatically by FileSystemWatcher / ShellChanges
+            File.Move(txtPath, vbsPath);
+            ImageSource? vbsImgAfter = null;
+            for (int w = 0; w < 45; w++)
+            {
+                await Task.Delay(100);
+                vbsImgAfter = TileIconSource(drawer, vbsPath);
+                if (vbsImgAfter != null && !ReferenceEquals(vbsImgAfter, txtImgBefore)) break;
+            }
+            var keepImgAfterRename = TileIconSource(drawer, keepPath);
+            Check(".txt -> .vbs extension change auto-updates drawer icon", vbsImgAfter != null && !ReferenceEquals(vbsImgAfter, txtImgBefore));
+            Check("unaffected sibling icon keeps same ImageSource without flicker", ReferenceEquals(keepImgAfterRename, keepImgBefore));
+
+            // 2. Shortcut .lnk icon resource replacement detected automatically
+            SetShortcutIcon(lnkPath, Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Windows), @"System32\notepad.exe"), icoB + ",0");
+            ImageSource? lnkImgAfter = null;
+            for (int w = 0; w < 45; w++)
+            {
+                await Task.Delay(100);
+                lnkImgAfter = TileIconSource(drawer, lnkPath);
+                if (lnkImgAfter != null && !ReferenceEquals(lnkImgAfter, lnkImgBefore)) break;
+            }
+            Check(".lnk icon replacement auto-updates drawer icon", lnkImgAfter != null && !ReferenceEquals(lnkImgAfter, lnkImgBefore));
+
+            // 3. Folder custom desktop.ini + ReadOnly attribute detected and refreshed
+            File.WriteAllText(Path.Combine(dirPath, "desktop.ini"), $"[.ShellClassInfo]\r\nIconResource={icoB},0\r\n");
+            File.SetAttributes(dirPath, FileAttributes.ReadOnly);
+            c.TriggerIconReconcileNow();
+            ImageSource? dirImgAfter = null;
+            for (int w = 0; w < 35; w++)
+            {
+                await Task.Delay(100);
+                dirImgAfter = TileIconSource(drawer, dirPath);
+                if (dirImgAfter != null && !ReferenceEquals(dirImgAfter, dirImgBefore)) break;
+            }
+            Check("folder desktop.ini custom icon updates via reconcile", dirImgAfter != null && !ReferenceEquals(dirImgAfter, dirImgBefore));
+
+            // 4. SHCNE_ASSOCCHANGED broadcast revalidates cleanly without breaking unaffected visuals
+            SHChangeNotify(0x08000000, 0x0000, 0, 0);
+            await Task.Delay(650);
+            var keepAfterAssoc = TileIconSource(drawer, keepPath);
+            Check("SHCNE_ASSOCCHANGED preserves unaffected icon visuals (no flicker)", ReferenceEquals(keepAfterAssoc, keepImgBefore));
+            Check("icon cache hit counter active", c.IconCacheHits > 0, new { hits = c.IconCacheHits, loads = c.IconLoads });
+
+            allPass = checks.All(item => (bool)item.GetType().GetProperty("pass")!.GetValue(item)!);
+        }
+        catch (Exception ex)
+        {
+            Program.Log(ex);
+            Check("exception", false, ex.ToString());
+            allPass = false;
+        }
+        finally
+        {
+            foreach (var f in new[] { txtPath, vbsPath, keepPath, lnkPath, icoA, icoB })
+                try { if (File.Exists(f)) File.Delete(f); } catch { }
+            try { if (Directory.Exists(dirPath)) { File.SetAttributes(dirPath, FileAttributes.Normal); Directory.Delete(dirPath, true); } } catch { }
+            File.WriteAllText(Path.Combine(Output, "icon-sync-result.json"), JsonSerializer.Serialize(new { pass = allPass, checks }, new JsonSerializerOptions { WriteIndented = true }));
+            Environment.ExitCode = allPass ? 0 : 1;
+            Application.Current.Shutdown(allPass ? 0 : 1);
+            Environment.Exit(allPass ? 0 : 1);
+        }
+    }
+
     internal static async Task Update(Controller c)
     {
         var checks=new List<object>();

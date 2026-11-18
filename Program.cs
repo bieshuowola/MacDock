@@ -88,7 +88,7 @@ internal static class Program
                 dockStability = args.Contains("--dock-stability-test");
                 testing|=args.Contains("--genie-idle-check");
                 drawerPasteReuse = args.Contains("--drawer-paste-reuse-test");
-                testing|=args.Contains("--experience-test")||productPreview||dragE2E||externalDropPin||drawerStability||dockStability||drawerPasteReuse||args.Contains("--update-ui-test");
+                testing|=args.Contains("--experience-test")||productPreview||dragE2E||externalDropPin||drawerStability||dockStability||drawerPasteReuse||args.Contains("--update-ui-test")||args.Contains("--icon-sync-test");
 #endif
 #if MACDOCK_EXPERIENCE_CHECKS
                 if(testing&&Environment.GetEnvironmentVariable("MACDOCK_QA_SOFTWARE_RENDER")=="1")
@@ -112,6 +112,7 @@ internal static class Program
                 if(args.Contains("--drawer-stability-test"))app.Dispatcher.BeginInvoke(DispatcherPriority.Normal,()=>{_=ExperienceChecks.DrawerStability(c);});
                 if(args.Contains("--dock-stability-test"))app.Dispatcher.BeginInvoke(DispatcherPriority.Normal,()=>{_=ExperienceChecks.DockStability(c);});
                 if(args.Contains("--drawer-paste-reuse-test"))app.Dispatcher.BeginInvoke(DispatcherPriority.Normal,()=>{_=ExperienceChecks.DrawerPasteReuse(c);});
+                if(args.Contains("--icon-sync-test"))app.Dispatcher.BeginInvoke(DispatcherPriority.Normal,()=>{_=ExperienceChecks.IconSync(c);});
                 if(args.Contains("--update-ui-test"))app.Dispatcher.BeginInvoke(DispatcherPriority.Normal,()=>{_=ExperienceChecks.Update(c);});
 #endif
                 if(args.Contains("--proportion-test"))app.Dispatcher.BeginInvoke(DispatcherPriority.Normal,()=>{_=ProportionChecks.Run(c);});
@@ -278,6 +279,13 @@ internal sealed class Controller : IDisposable
     readonly Intent intent=new();
     readonly uint taskbarCreated=Native.RegisterWindowMessage("TaskbarCreated");
     readonly DispatcherTimer wake=new(),leave=new(),refresh=new(),syncDebounce=new(),safetySync=new(),suppressPoll=new();
+    readonly DispatcherTimer iconRefreshDebounce=new(){Interval=TimeSpan.FromMilliseconds(80)};
+    readonly DispatcherTimer iconGlobalDebounce=new(){Interval=TimeSpan.FromMilliseconds(250)};
+    readonly DispatcherTimer iconReconcileTimer=new(){Interval=TimeSpan.FromSeconds(15)};
+    readonly HashSet<string> pendingIconRefresh=new(StringComparer.OrdinalIgnoreCase);
+    int iconReconcileTickCount;
+    internal int IconCacheHits {get;private set;}
+    internal int IconLoads {get;private set;}
     bool keySuppressingDock;
     readonly DispatcherTimer displayRetry=new(){Interval=TimeSpan.FromMilliseconds(350)};
     bool displayUnavailable;
@@ -424,6 +432,16 @@ internal sealed class Controller : IDisposable
         refresh.Interval=TimeSpan.FromMilliseconds(150);refresh.Tick+=(_,_)=> { refresh.Stop();if(disposed)return;if(dockMotion.Running||drawerMotion.Running){refresh.Start();return;}CheckFullscreen();if(Dock.IsVisible)Dock.UpdateDots(); };
         syncDebounce.Interval=TimeSpan.FromMilliseconds(450);syncDebounce.Tick+=(_,_)=> { syncDebounce.Stop();SyncDesktop(); };
         safetySync.Interval=TimeSpan.FromMinutes(5);safetySync.Tick+=(_,_)=> { if(!InternalDragging)SyncDesktop(); };
+        iconRefreshDebounce.Tick+=(_,_)=>FlushPendingIconRefresh();
+        iconGlobalDebounce.Tick+=(_,_)=>{iconGlobalDebounce.Stop();if(dockMotion.Running||drawerMotion.Running||Drawer?.Scroller.IsScrolling==true){iconGlobalDebounce.Start();return;}RevalidateIcons();};
+        iconReconcileTimer.Tick+=(_,_)=>{
+            if(disposed)return;
+            iconReconcileTickCount++;
+            if(Drawer?.IsVisible!=true&&(iconReconcileTickCount&3)!=0)return;
+            if(dockMotion.Running||drawerMotion.Running||Drawer?.Scroller.IsScrolling==true||InternalDragging||MenuOpen||Busy)return;
+            ReconcileIcons();
+        };
+        iconReconcileTimer.Start();
         suppressPoll.Interval=TimeSpan.FromMilliseconds(40);suppressPoll.Tick+=(_,_)=>PollSuppressWakeKey();
         if(SuppressWakeKey>0)suppressPoll.Start();
         externalDragEscape.Tick+=(_,_)=>
@@ -468,6 +486,12 @@ internal sealed class Controller : IDisposable
         if(msg==0x0312) { ToggleDrawer();handled=true; }
         if(taskbarCreated!=0&&msg==(int)taskbarCreated){RegisterShellChanges();StartWatchers();Position();CheckFullscreen();ScheduleSync();}
         if(msg is 0x02e0 or 0x001a or 0x007e) System.Windows.Application.Current.Dispatcher.BeginInvoke(Position);
+        if(msg==0x001a)
+        {
+            string? area=lp!=0?Marshal.PtrToStringUni(lp):null;
+            if(area==null||area.Contains("Explorer",StringComparison.OrdinalIgnoreCase)||area.Contains("Shell",StringComparison.OrdinalIgnoreCase)||area.Equals("Policy",StringComparison.OrdinalIgnoreCase))
+                System.Windows.Application.Current.Dispatcher.BeginInvoke(ScheduleGlobalIconRevalidate);
+        }
         return 0;
     }
     void DisplayChanged(object? s,EventArgs e)=>System.Windows.Application.Current.Dispatcher.BeginInvoke(()=>{displayRetries=0;RefreshDisplay();});
@@ -477,7 +501,18 @@ internal sealed class Controller : IDisposable
         Screen=Forms.Screen.AllScreens.FirstOrDefault(x=>x.DeviceName==Store.Data.Monitor)??Forms.Screen.PrimaryScreen??Screen;
         Position();CheckFullscreen();
     }
-    void PreferenceChanged(object? s,UserPreferenceChangedEventArgs e) { PrefCount++;DisplayChanged(s,e);System.Windows.Application.Current.Dispatcher.BeginInvoke(()=> { Theme.Apply(Store.Data.Appearance);InvalidateIcons();ScheduleSync(); }); }
+    void PreferenceChanged(object? s,UserPreferenceChangedEventArgs e)
+    {
+        PrefCount++;DisplayChanged(s,e);
+        System.Windows.Application.Current.Dispatcher.BeginInvoke(()=>
+        {
+            bool wasDark=Theme.Dark;
+            Theme.Apply(Store.Data.Appearance);
+            if(wasDark!=Theme.Dark)InvalidateIcons();
+            else if(e.Category is UserPreferenceCategory.Desktop or UserPreferenceCategory.General)ScheduleGlobalIconRevalidate();
+            ScheduleSync();
+        });
+    }
     void PowerChanged(object? s,PowerModeChangedEventArgs e) { if(e.Mode==PowerModes.Resume)System.Windows.Application.Current.Dispatcher.BeginInvoke(()=> { hook?.Dispose();hook=new PointerHook(OnPointerEvent,FilterPointer);Position();CheckFullscreen();SyncDesktop(); }); }
     internal void TestResumeLifecycle()=>PowerChanged(null,new PowerModeChangedEventArgs(PowerModes.Resume));
 
@@ -496,10 +531,10 @@ internal sealed class Controller : IDisposable
                     IncludeSubdirectories=false,
                     NotifyFilter=NotifyFilters.FileName|NotifyFilters.DirectoryName|NotifyFilters.Attributes|NotifyFilters.LastWrite|NotifyFilters.Size
                 };
-                watcher.Created+=(_,_)=>ScheduleSync();
-                watcher.Deleted+=(_,_)=>ScheduleSync();
-                watcher.Changed+=(_,e)=>{ScheduleSync();System.Windows.Application.Current.Dispatcher.BeginInvoke(()=>RefreshIconPath(e.FullPath));};
-                watcher.Renamed+=(_,e)=>System.Windows.Application.Current.Dispatcher.BeginInvoke(()=> { if(Store.Repoint(e.OldFullPath,e.FullPath,true)) { mirrorVisualDirty=true;Store.Save(); } ScheduleSync(); });
+                watcher.Created+=(_,e)=>{ScheduleSync();ScheduleIconPathRefresh(e.FullPath);};
+                watcher.Deleted+=(_,e)=>{ScheduleSync();ScheduleIconPathRefresh(e.FullPath);};
+                watcher.Changed+=(_,e)=>{ScheduleSync();ScheduleIconPathRefresh(e.FullPath);};
+                watcher.Renamed+=(_,e)=>System.Windows.Application.Current.Dispatcher.BeginInvoke(()=> { if(Store.Repoint(e.OldFullPath,e.FullPath,true)) { mirrorVisualDirty=true;Store.Save(); } ScheduleIconPathRefresh(e.OldFullPath);ScheduleIconPathRefresh(e.FullPath);ScheduleSync(); });
                 watcher.Error+=(_,_)=>ScheduleSync();
                 watcher.EnableRaisingEvents=true;
                 watchers.Add(watcher);
@@ -509,9 +544,14 @@ internal sealed class Controller : IDisposable
     }
     void RegisterShellChanges(){shellChanges?.Dispose();shellChanges=new ShellChanges(indicator.Handle,(events,paths)=>{
         if(disposed)return;
-        if((events&0x08000000)!=0)InvalidateIcons();
-        if((events&0x20001)!=0&&paths.Length==2&&Store.Repoint(paths[0],paths[1],true)){mirrorVisualDirty=true;Store.Save();}
-        foreach(var path in paths)RefreshIconPath(path);
+        if((events&0x08008000)!=0)ScheduleGlobalIconRevalidate();
+        if((events&0x20001)!=0&&paths.Length==2)
+        {
+            if(Store.Repoint(paths[0],paths[1],true)){mirrorVisualDirty=true;Store.Save();}
+            ScheduleIconPathRefresh(paths[0]);
+            ScheduleIconPathRefresh(paths[1]);
+        }
+        foreach(var path in paths)ScheduleIconPathRefresh(path);
         ScheduleSync();
     });}
     bool awaitingInitialDesktop;
@@ -625,15 +665,17 @@ internal sealed class Controller : IDisposable
         lock(iconGate)
         {
             if(!icons.TryGetValue(key,out slot!)){if(icons.Count>=2048)EvictStaleIcon();icons[key]=slot=new IconEntry();}
-            if(slot.Loading||slot.Stamp==stamp)return slot;
+            if(slot.Loading||slot.Stamp==stamp){IconCacheHits++;return slot;}
             if(Native.TryGetCachedIcon(path,px) is {} cached)
             {
+                IconCacheHits++;
                 slot.Update(Icons.Measure(cached),stamp);
                 iconRetryAfter.Remove(key);
                 return slot;
             }
             if(iconRetryAfter.TryGetValue(key,out var retryAt)&&Environment.TickCount64<retryAt)return slot;
             slot.Loading=true;revision=slot.Revision;
+            IconLoads++;
         }
         GestureChecks.Trace?.Invoke("icon-request",new{path,px,oldStamp=slot.Stamp,stamp,slot=System.Runtime.CompilerServices.RuntimeHelpers.GetHashCode(slot)});
         iconDispatcher.BeginInvoke(DispatcherPriority.Background,()=>
@@ -679,6 +721,73 @@ internal sealed class Controller : IDisposable
         }
         foreach(var key in keys)RequestIcon(key.Path,key.Px);
     }
+    void ScheduleGlobalIconRevalidate()
+    {
+        if(disposed)return;
+        System.Windows.Application.Current.Dispatcher.BeginInvoke(()=>{iconGlobalDebounce.Stop();iconGlobalDebounce.Start();});
+    }
+    void RevalidateIcons()
+    {
+        if(disposed)return;
+        IconResources.Invalidate();
+        Native.ClearIconCache();
+        lock(iconGate)
+        {
+            iconRetryAfter.Clear();
+            foreach(var slot in icons.Values){slot.Stamp="";slot.Revision++;slot.RetryCount=0;}
+        }
+        // Re-extract active entries asynchronously; IconEntry.Update swaps visuals only when Fingerprint changes (zero flicker).
+        WarmIcons();
+    }
+    internal void TriggerIconReconcileNow()=>ReconcileIcons();
+    void ReconcileIcons()
+    {
+        if(disposed)return;
+        IconResources.InvalidateAssociations();
+        var stale=new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var active=Store.Data.Entries.Where(e=>e.InDrawer||e.Pinned).Select(e=>(e.Path,Px:Pixels(e.Pinned?Layout.Icon:Layout.DrawerIcon))).ToArray();
+        lock(iconGate)
+        {
+            foreach(var item in active)
+            {
+                var key=(item.Path.ToUpperInvariant(),item.Px);
+                if(icons.TryGetValue(key,out var slot)&&!slot.Loading)
+                {
+                    if(slot.Stamp!=IconResources.Stamp(item.Path))stale.Add(item.Path);
+                }
+            }
+        }
+        foreach(var path in stale)RefreshIconPath(path);
+    }
+    void ScheduleIconPathRefresh(string? path)
+    {
+        if(disposed||string.IsNullOrWhiteSpace(path))return;
+        System.Windows.Application.Current.Dispatcher.BeginInvoke(()=>
+        {
+            if(disposed)return;
+            pendingIconRefresh.Add(path);
+            if(Path.GetFileName(path).Equals("desktop.ini",StringComparison.OrdinalIgnoreCase))
+            {
+                if(Path.GetDirectoryName(path) is string parent&&!string.IsNullOrWhiteSpace(parent))
+                    pendingIconRefresh.Add(parent);
+            }
+            iconRefreshDebounce.Stop();
+            iconRefreshDebounce.Start();
+        });
+    }
+    void FlushPendingIconRefresh()
+    {
+        iconRefreshDebounce.Stop();
+        if(disposed||pendingIconRefresh.Count==0)return;
+        if(dockMotion.Running||drawerMotion.Running||Drawer?.Scroller.IsScrolling==true)
+        {
+            iconRefreshDebounce.Start();
+            return;
+        }
+        var batch=pendingIconRefresh.ToArray();
+        pendingIconRefresh.Clear();
+        foreach(var p in batch)RefreshIconPath(p);
+    }
     void RefreshIconPath(string path)
     {
         if(disposed)return;
@@ -690,7 +799,7 @@ internal sealed class Controller : IDisposable
             keys=icons.Keys.Where(k=>k.Path.Equals(path,StringComparison.OrdinalIgnoreCase)).ToArray();
             foreach(var key in keys){iconRetryAfter.Remove(key);var slot=icons[key];slot.Stamp="";slot.Revision++;slot.RetryCount=0;}
         }
-        foreach(var key in keys)RequestIcon(path,key.Px);
+        foreach(var key in keys)RequestIcon(key.Path,key.Px);
     }
 
     void ReinstallPointerHook() { try { hook?.Dispose();hook=new PointerHook(OnPointerEvent,FilterPointer); } catch(Exception e) { Program.Log(e); } }
@@ -2210,7 +2319,7 @@ internal sealed class Controller : IDisposable
     {
         void Trace(string value){if(Environment.GetEnvironmentVariable("MACDOCK_TEST_RESULTS") is string folder)File.AppendAllText(Path.Combine(folder,"dispose-stages.txt"),value+Environment.NewLine);}
         Trace("begin");
-        if(disposed)return;disposed=true;Native.RestoreSystemCursors(force:true);updateCheck.Stop();updateLifetime.Cancel();updateLifetime.Dispose();dockMotion.Cancel();drawerMotion.Cancel();EndAnimationBoost(force:true);PointerSort.Active?.End(false);if(trayMenu!=null)trayMenu.IsOpen=false;wake.Stop();leave.Stop();refresh.Stop();syncDebounce.Stop();safetySync.Stop();displayRetry.Stop();suppressPoll.Stop();foreach(var t in iconRetryTimers.ToArray())t.Stop();iconRetryTimers.Clear();
+        if(disposed)return;disposed=true;Native.RestoreSystemCursors(force:true);updateCheck.Stop();updateLifetime.Cancel();updateLifetime.Dispose();dockMotion.Cancel();drawerMotion.Cancel();EndAnimationBoost(force:true);PointerSort.Active?.End(false);if(trayMenu!=null)trayMenu.IsOpen=false;wake.Stop();leave.Stop();refresh.Stop();syncDebounce.Stop();safetySync.Stop();displayRetry.Stop();suppressPoll.Stop();iconRefreshDebounce.Stop();iconGlobalDebounce.Stop();iconReconcileTimer.Stop();foreach(var t in iconRetryTimers.ToArray())t.Stop();iconRetryTimers.Clear();
         foreach(var w in watchers) { try { w.EnableRaisingEvents=false;w.Dispose(); } catch { } }
         SystemEvents.DisplaySettingsChanged-=DisplayChanged;SystemEvents.UserPreferenceChanged-=PreferenceChanged;SystemEvents.PowerModeChanged-=PowerChanged;
         hook?.Dispose();shellChanges?.Dispose();foreach(var h in eventHooks)Native.UnhookWinEvent(h);

@@ -1094,7 +1094,7 @@ internal sealed class DockWindow : GlassWindow
         var iconHost = new Grid
         {
             Width = iconSize, Height = iconSize, RenderTransformOrigin = new Point(.5, .55),
-            RenderTransform = iconScale
+            RenderTransform = iconScale, Tag = (e.Path, iconSize)
         };
         iconHost.Children.Add(Icons.View(owner.Icon(e.Path, iconSize), iconSize));
         panel.Children.Add(iconHost);

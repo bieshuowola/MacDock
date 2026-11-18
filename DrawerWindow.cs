@@ -1105,6 +1105,16 @@ internal sealed class DrawerWindow : GlassWindow
                     System.Windows.Automation.AutomationProperties.SetHelpText(tile, e.Name);
                     if (tile.Child is StackPanel panel)
                     {
+                        var iconHost = panel.Children.OfType<Grid>().FirstOrDefault();
+                        if (iconHost != null && (iconHost.Tag is not ValueTuple<string, double> bound ||
+                            !string.Equals(bound.Item1, e.Path, StringComparison.OrdinalIgnoreCase) ||
+                            Math.Abs(bound.Item2 - l.DrawerIcon) > 0.1))
+                        {
+                            iconHost.Children.Clear();
+                            iconHost.Children.Add(Icons.View(owner.Icon(e.Path, l.DrawerIcon), l.DrawerIcon));
+                            iconHost.Tag = (e.Path, l.DrawerIcon);
+                            InvalidatePrebakedSurface();
+                        }
                         foreach (var label in panel.Children.OfType<TextBlock>())
                             if (label.Text != e.Name) label.Text = e.Name;
                     }

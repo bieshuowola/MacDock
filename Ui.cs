@@ -349,6 +349,7 @@ internal sealed class SmoothScrollViewer : ScrollViewer
     bool wheeling,dragging;
     int wheelRevision;
     internal string WheelDiagnostics=>$"requests={wheelRevision}; animated={GetValue(AnimatedOffsetProperty)}; target={target}; actual={VerticalOffset}; extent={ExtentHeight}; viewport={ViewportHeight}; measure={IsMeasureValid}; arrange={IsArrangeValid}";
+    internal bool IsScrolling => wheeling || dragging;
     int fadeToken;
     System.Windows.Controls.Primitives.ScrollBar? bar;
     readonly DispatcherTimer hide=new(){Interval=TimeSpan.FromSeconds(1)};
