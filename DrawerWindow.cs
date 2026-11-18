@@ -714,11 +714,12 @@ internal sealed class DrawerWindow : GlassWindow
         scrollBakeIdle.Stop();
     }
 
-    ScrollAnchor? CaptureScrollAnchor()
+    ScrollAnchor? CaptureScrollAnchor(string? movedId=null)
     {
         if(visibleOrder.Count==0||!groups.IsArrangeValid)return null;
-        var order=visibleOrder.Select(e=>e.Id).ToArray();
         double offset=scroll.VerticalOffset;
+        if(offset<.01)return new ScrollAnchor(Array.Empty<string>(),0,0,0);
+        var order=visibleOrder.Where(e=>e.Id!=movedId).Select(e=>e.Id).ToArray();
         double closest=double.PositiveInfinity;
         int index=0;
         double inset=0;
@@ -1080,7 +1081,13 @@ internal sealed class DrawerWindow : GlassWindow
 
     // ---------------------------------------------------------------- rendering
     internal IReadOnlyList<FrameworkElement> SortTiles(bool manual)=>visibleOrder.Where(e=>(e.Source=="manual")==manual).Where(e=>tiles.ContainsKey(e.Id)).Select(e=>(FrameworkElement)tiles[e.Id]).ToArray();
-    internal void ApplyCustomOrder(){Render();groups.BeginAnimation(OpacityProperty,null);groups.Opacity=1;}
+    internal void ApplyCustomOrder(string? movedId=null)
+    {
+        // Keep the same part of the list visible without following the moved tile.
+        if(movedId!=null)pendingAnchor=CaptureScrollAnchor(movedId);
+        Render();
+        groups.BeginAnimation(OpacityProperty,null);groups.Opacity=1;
+    }
     public void Render()
     {
         var current= pendingAnchor??CaptureScrollAnchor();

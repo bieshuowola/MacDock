@@ -1459,7 +1459,7 @@ internal sealed class Controller : IDisposable
     long launchPendingUntil;
     readonly Dictionary<string,nint> minimizedFromDock=new(StringComparer.OrdinalIgnoreCase);
     public void Changed() { Save();if(Store.Data.ReducedMotion&&Dock.IsVisible)SettleDockMotion();Dock.Rebuild();Drawer?.Render();Position(); }
-    internal void CommitSort(IReadOnlyList<string> scope,string id,int index,bool dock){if(!PersistArrangement(()=>Store.SortScope(scope,id,index,dock)))return;if(dock)Dock.ApplyPinnedOrder();else Drawer?.ApplyCustomOrder();}
+    internal void CommitSort(IReadOnlyList<string> scope,string id,int index,bool dock){if(!PersistArrangement(()=>Store.SortScope(scope,id,index,dock)))return;if(dock)Dock.ApplyPinnedOrder();else Drawer?.ApplyCustomOrder(id);}
     internal bool PersistArrangement(Action change)
     {
         var entries=Store.Data.Entries.ToList();var pins=entries.Select(e=>e.Pinned).ToArray();var order=Store.Data.DockOrder.ToList();
