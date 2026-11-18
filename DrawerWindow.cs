@@ -1318,6 +1318,8 @@ internal sealed class DrawerWindow : GlassWindow
     internal void EnsureVisible(string id)
     {
         if(!tiles.TryGetValue(id,out var tile)) return;
+        RestoreScrollAnchor();
+        scroll.StopWheel();
         tile.BringIntoView();
         scroll.UpdateLayout();
     }
