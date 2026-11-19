@@ -20,6 +20,7 @@ internal sealed class PointerHook : IDisposable
     readonly Action<WakeShortcut,nint>? wakePressed;
     static readonly Func<int,bool> KeyHeld=Native.KeyHeld;
     volatile WakeShortcut? wakeShortcut;
+    volatile bool wakeSuspended;
     const uint WakeBindingChanged=0x8001;
     internal static int Installations;
     internal static bool AuditInput;
@@ -28,6 +29,7 @@ internal sealed class PointerHook : IDisposable
 
     public bool Available => hook != 0;
     internal bool WakeKeyListening => Volatile.Read(ref keyHook)!=0;
+    internal void SetWakeSuspended(bool suspended) => wakeSuspended=suspended;
     internal void SetWakeShortcut(WakeShortcut? shortcut)
     {
         wakeShortcut=shortcut;
@@ -88,7 +90,7 @@ internal sealed class PointerHook : IDisposable
 
     nint ObserveWakeKey(int code,nint message,nint data)
     {
-        if(code==0&&!disposed&&message is 0x0100 or 0x0104)
+        if(code==0&&!disposed&&!wakeSuspended&&message is 0x0100 or 0x0104)
         {
             try
             {

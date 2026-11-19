@@ -2,6 +2,7 @@ using System.IO;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
+using System.Windows.Interop;
 using System.Windows.Media;
 using Microsoft.Win32;
 using Forms = System.Windows.Forms;
@@ -92,9 +93,11 @@ internal static class Dialogs
         openMode.SelectionChanged+=(_,_)=>{if(correcting||openMode.SelectedIndex<0)return;if(!c.SaveSetting(()=>data.DoubleClickToOpen,v=>data.DoubleClickToOpen=v,openMode.SelectedIndex==1)){correcting=true;openMode.SelectedIndex=data.DoubleClickToOpen?1:0;correcting=false;}else { c.Dock.ClearDoubleClickState(); c.Drawer?.ApplySelectionVisuals(); }};
         bool recordingKey=false;
         var held=new HashSet<int>();
+        var swallowAfterRecord=new HashSet<int>();
         string? recordingError=null;
         var bindKey=ButtonFor(c.WakeShortcutDisplay,()=>{});
-        bindKey.MinWidth=88;bindKey.Margin=new Thickness(0);bindKey.Effect=null;bindKey.FocusVisualStyle=null;
+        bindKey.MinWidth=108;bindKey.Margin=new Thickness(0);bindKey.Effect=null;bindKey.FocusVisualStyle=null;
+        InputMethod.SetIsInputMethodEnabled(bindKey,false);
         var clearKey=ButtonFor("清除",()=>{});
         clearKey.Margin=new Thickness(6,0,0,0);clearKey.Effect=null;clearKey.FocusVisualStyle=null;
         void RefreshSuppressButtons()
@@ -103,26 +106,46 @@ internal static class Dialogs
             System.Windows.Automation.AutomationProperties.SetItemStatus(bindKey,(string)bindKey.Content);
             clearKey.IsEnabled=!recordingKey&&c.HasWakeShortcut;
         }
-        void EndRecording()
+        void EndRecording(bool preserveHeldToSwallow=false)
         {
             recordingKey=false;
+            c.SetWakeRecording(false);
+            if(preserveHeldToSwallow)
+            {
+                foreach(int k in held)swallowAfterRecord.Add(WakeShortcut.Normalize(k));
+            }
             held.Clear();
             recordingError=null;
             RefreshSuppressButtons();
         }
+        static Key ResolveKey(KeyEventArgs a)
+        {
+            var k=a.Key==Key.System?a.SystemKey:a.Key;
+            if(k==Key.ImeProcessed)k=a.ImeProcessedKey;
+            return k;
+        }
         RefreshSuppressButtons();
-        bindKey.Click+=(_,_)=>{if(recordingKey){EndRecording();return;}recordingKey=true;RefreshSuppressButtons();bindKey.Focus();};
-        clearKey.Click+=(_,_)=>{c.SetWakeShortcut(null);EndRecording();};
+        bindKey.Click+=(_,_)=>{if(recordingKey){EndRecording();return;}swallowAfterRecord.Clear();recordingKey=true;c.SetWakeRecording(true);RefreshSuppressButtons();bindKey.Focus();};
+        clearKey.Click+=(_,_)=>{swallowAfterRecord.Clear();c.SetWakeShortcut(null);EndRecording();};
         var suppressPanel=new StackPanel{Orientation=Orientation.Horizontal,HorizontalAlignment=HorizontalAlignment.Right,VerticalAlignment=VerticalAlignment.Center,Background=Brushes.Transparent,Margin=new Thickness(0)};
         suppressPanel.Children.Add(bindKey);suppressPanel.Children.Add(clearKey);
         w.PreviewKeyDown+=(_,a)=>
         {
-            if(!recordingKey)return;
+            var key=ResolveKey(a);
+            if(!recordingKey)
+            {
+                if(swallowAfterRecord.Count>0)
+                {
+                    int norm=WakeShortcut.Normalize(KeyInterop.VirtualKeyFromKey(key));
+                    if(swallowAfterRecord.Contains(norm))a.Handled=true;
+                }
+                return;
+            }
             a.Handled=true;
-            var key=a.Key==Key.System?a.SystemKey:a.Key;
             if(key==Key.Escape){EndRecording();return;}
             if(a.IsRepeat)return;
             int vk=KeyInterop.VirtualKeyFromKey(key);
+            if(vk<=0)return;
             if(held.Count==0)recordingError=null;
             held.Add(vk);
             var keys=held.Select(WakeShortcut.Normalize).Distinct().ToArray();
@@ -136,27 +159,48 @@ internal static class Dialogs
         };
         w.PreviewKeyUp+=(_,a)=>
         {
-            if(!recordingKey)return;
-            a.Handled=true;
-            var key=a.Key==Key.System?a.SystemKey:a.Key;
+            var key=ResolveKey(a);
             int vk=KeyInterop.VirtualKeyFromKey(key);
+            int norm=WakeShortcut.Normalize(vk);
+            if(!recordingKey)
+            {
+                if(swallowAfterRecord.Remove(norm))a.Handled=true;
+                return;
+            }
+            a.Handled=true;
             if(!held.Contains(vk))return;
             var shortcut=recordingError==null?WakeShortcut.Create(held):null;
             held.Remove(vk);
             if(recordingError!=null)return;
             if(shortcut==null)recordingError="请搭配其他键使用";
-            else if(shortcut.UsesDrawerHotkey)recordingError="此组合键用于打开抽屉";
-            else if(c.SetWakeShortcut(shortcut)){EndRecording();return;}
+            else if(c.SetWakeShortcut(shortcut)){EndRecording(preserveHeldToSwallow:true);return;}
             else recordingError="绑定未保存，请重试";
             RefreshSuppressButtons();
         };
-        w.Deactivated+=(_,_)=>{if(recordingKey)EndRecording();};
+        nint SysMenuHook(nint hwnd,int msg,nint wp,nint lp,ref bool handled)
+        {
+            if((recordingKey||swallowAfterRecord.Count>0)&&(msg==0x0112&&(wp.ToInt64()&0xFFF0)==0xF100||msg==0x0106))
+            {
+                handled=true;
+                return 0;
+            }
+            return 0;
+        }
+        w.SourceInitialized+=(_,_)=>HwndSource.FromHwnd(new WindowInteropHelper(w).Handle)?.AddHook(SysMenuHook);
+        w.Closed+=(_,_)=>{swallowAfterRecord.Clear();c.SetWakeRecording(false);if(PresentationSource.FromVisual(w) is HwndSource src)src.RemoveHook(SysMenuHook);};
+        w.Deactivated+=(_,_)=>{swallowAfterRecord.Clear();if(recordingKey)EndRecording();else c.SetWakeRecording(false);};
         var openModeRow=Row("抽屉图标打开方式",openMode);
-        var suppressRow=Row("按键切换 Dock 唤出",suppressPanel);
-        System.Windows.Automation.AutomationProperties.SetName(bindKey,"按键切换 Dock 唤出");
-        Theme.Tip(bindKey,"同时按住一至四键，松开即保存。Esc 取消。修饰键可参与组合，Pause/Break、输入法键及特殊系统键不可绑定。");
-        System.Windows.Automation.AutomationProperties.SetName(clearKey,"清除屏蔽唤醒按键");
-        Group("常规",Row("开机自启动",startup),Row("减少动画效果",motion),openModeRow,suppressRow);
+        var suppressRow=Row("临时关闭 MacDock",suppressPanel);
+        var suppressDesc=Theme.Text("设置一个快捷键，按下后临时关闭 MacDock 的自动弹出功能，再次按下即可恢复。MacDock 仍在后台运行，底部唤醒小横条保持可用。",11.5,true);
+        suppressDesc.TextWrapping=TextWrapping.Wrap;
+        suppressDesc.Margin=new Thickness(0,2,0,4);
+        var suppressBlock=new StackPanel();
+        suppressBlock.Children.Add(suppressRow);
+        suppressBlock.Children.Add(suppressDesc);
+        System.Windows.Automation.AutomationProperties.SetName(bindKey,"临时关闭 MacDock");
+        Theme.Tip(bindKey,"点击后同时按住一至四键，松开即保存，Esc 取消。支持单键或最多四键组合，Pause/Break、输入法键及特殊系统键不可绑定。");
+        System.Windows.Automation.AutomationProperties.SetName(clearKey,"清除临时关闭快捷键");
+        Group("常规",Row("开机自启动",startup),Row("减少动画效果",motion),openModeRow,suppressBlock);
 
         string[] themes={"system","light","dark"};
         var appearance=Choice(new[]{"跟随 Windows","浅色","深色"},Math.Max(0,Array.IndexOf(themes,data.Appearance)));

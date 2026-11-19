@@ -342,7 +342,7 @@ internal sealed class DockWindow : GlassWindow
             HorizontalAlignment = HorizontalAlignment.Center, VerticalAlignment = VerticalAlignment.Center,
             Margin = new Thickness(owner.Store.Data.Entries.Any(e => e.Pinned) ? l.DockGap / 2 : 0, 0, 0, 0)
         };
-        root.Tag="应用抽屉 · Ctrl+Alt+空格";
+        root.Tag="应用抽屉";
         glyph.RenderTransform=sheetLift;
         System.Windows.Automation.AutomationProperties.SetName(root, "打开应用抽屉");
         root.MouseEnter += (_, _) => {root.Background = Theme.FillHover;ResetMagnification();};
@@ -883,7 +883,7 @@ internal sealed class DockWindow : GlassWindow
         if(item==tipCandidate)return;CancelTip();tipCandidate=item;tipTimer.Start();
     }
     void ShowTip(){tipTimer.Stop();var expected=tipCandidate;if(expected==null)return;Native.GetCursorPos(out var p);ObserveTip(p,true);if(tipCandidate!=expected)return;
-        var text=Theme.Text(expected.Entry?.Name??"应用抽屉 · Ctrl+Alt+空格",12.5);text.TextWrapping=TextWrapping.Wrap;text.MaxWidth=320;labelTip.Content=text;labelTip.PlacementTarget=this;var anchor=items.TranslatePoint(new Point(expected.Left+expected.Width/2,0),this);labelTip.PlacementRectangle=new Rect(anchor.X,0,0,0);labelTip.Measure(new Size(double.PositiveInfinity,double.PositiveInfinity));labelTip.HorizontalOffset=-labelTip.DesiredSize.Width/2;labelTip.VerticalOffset=-8*owner.Layout.Unit;labelTip.IsOpen=true;TipOpens++;
+        var text=Theme.Text(expected.Entry?.Name??"应用抽屉",12.5);text.TextWrapping=TextWrapping.Wrap;text.MaxWidth=320;labelTip.Content=text;labelTip.PlacementTarget=this;var anchor=items.TranslatePoint(new Point(expected.Left+expected.Width/2,0),this);labelTip.PlacementRectangle=new Rect(anchor.X,0,0,0);labelTip.Measure(new Size(double.PositiveInfinity,double.PositiveInfinity));labelTip.HorizontalOffset=-labelTip.DesiredSize.Width/2;labelTip.VerticalOffset=-8*owner.Layout.Unit;labelTip.IsOpen=true;TipOpens++;
     }
 
     readonly RunningApplications runningApplications=new();

@@ -730,7 +730,7 @@ internal static partial class Native
     }
     internal static string KeyName(int vk)
     {
-        if(vk<=0)return "待绑定";
+        if(vk<=0)return "未设置快捷键";
         return vk switch
         {
             0x10 or 0xA0 or 0xA1=>"Shift",

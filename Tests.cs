@@ -230,12 +230,17 @@ internal static class Tests
             var unsupportedWake=new Store(cfgDir).Data;
             Check("unsupported legacy wake key recovers to unbound",unsupportedWake.SuppressWakeKey==0&&!unsupportedWake.WakeDisabled&&
                 !Native.IsWakeBindingKey(0x03)&&!Native.IsWakeBindingKey(0xE7)&&!Native.IsWakeBindingKey(0x11));
-            Check("SuppressWakeKey labels valid",Native.KeyName(0)=="待绑定"&&Native.KeyName(0x11)=="Ctrl");
+            Check("SuppressWakeKey labels valid",Native.KeyName(0)=="未设置快捷键"&&Native.KeyName(0x11)=="Ctrl");
             cfgReload.Data.WakeShortcutKeys=new[]{0x77,0xA2,0xA5,0xA1};cfgReload.SaveSettings();
             var shortcutConfig=new Store(cfgDir).Data;
             var shortcut=WakeShortcut.Create(shortcutConfig.WakeShortcutKeys??Array.Empty<int>());
             Check("four-key chord and mode persist in display order",shortcut?.Display=="Ctrl + Alt + Shift + F8"&&
                 shortcutConfig.SuppressWakeKey==0&&shortcutConfig.WakeDisabled);
+            cfgReload.Data.WakeShortcutKeys=new[]{0x11,0x12,0x20};cfgReload.SaveSettings();
+            var ctrlAltSpaceConfig=new Store(cfgDir).Data;
+            var ctrlAltSpace=WakeShortcut.Create(ctrlAltSpaceConfig.WakeShortcutKeys??Array.Empty<int>());
+            Check("Ctrl + Alt + Space shortcut is permitted and persists",ctrlAltSpace?.Display=="Ctrl + Alt + Space"&&
+                ctrlAltSpaceConfig.WakeShortcutKeys?.SequenceEqual(new[]{0x11,0x12,0x20})==true);
             var pressed=new HashSet<int>{0x77,0x11,0x12};
             Check("final modifier completes chord in any order",shortcut?.MatchesPress(0xA1,pressed.Contains)==true);
             pressed.Add(0x10);
@@ -547,7 +552,7 @@ internal static class Tests
         var saved=JsonSerializer.Serialize(c.Store.Data.Entries);string mode=c.Store.Data.Mode;
         try
         {
-            Check("mouse hook installed",c.HookAvailable,System.Runtime.InteropServices.RuntimeInformation.FrameworkDescription);Check("hotkey registered",c.HotkeyAvailable);
+            Check("mouse hook installed",c.HookAvailable,System.Runtime.InteropServices.RuntimeInformation.FrameworkDescription);
             Check("indicator desktop available",System.Windows.Forms.Screen.AllScreens.Length>0);
             var area=c.WorkArea;int x=area.Left+area.Width/2,y=area.Bottom-(int)(15*c.Scale);
             // Park the pointer away from the wake strip first so the intent state is deterministic.

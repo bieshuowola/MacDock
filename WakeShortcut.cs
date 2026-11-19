@@ -40,8 +40,6 @@ internal sealed class WakeShortcut
         _ => key + 4
     };
 
-    internal bool UsesDrawerHotkey => keys is [0x11, 0x12, 0x20];
-
     internal bool MatchesPress(int rawKey, Func<int, bool> keyHeld)
     {
         int key = Normalize(rawKey);

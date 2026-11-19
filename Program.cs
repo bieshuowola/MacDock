@@ -53,7 +53,7 @@ internal static class Program
         {
             bool acquired=false;
             try{acquired=mutex.WaitOne(0,false);}catch(AbandonedMutexException){acquired=true;}
-            if(!acquired) { System.Windows.MessageBox.Show("MacDock 已在运行，请使用托盘图标或 Ctrl+Alt+空格。","MacDock");return 0; }
+            if(!acquired) { System.Windows.MessageBox.Show("MacDock 已在运行，请使用托盘图标或底部唤醒小横条。","MacDock");return 0; }
         }
         int maxRefreshHz=60;
         foreach(var scr in Forms.Screen.AllScreens)maxRefreshHz=Math.Max(maxRefreshHz,Native.GetDisplayRefreshRate(scr.DeviceName));
@@ -202,11 +202,18 @@ internal sealed class Controller : IDisposable
     internal bool AutoHideDock { get; set; }
     internal int SuppressWakeKey => Store.Data.SuppressWakeKey;
     WakeShortcut? wakeShortcut;
-    internal string WakeShortcutDisplay => wakeShortcut?.Display ?? "待绑定";
+    internal string WakeShortcutDisplay => wakeShortcut?.Display ?? "未设置快捷键";
     internal bool HasWakeShortcut => wakeShortcut!=null;
     internal bool WakeKeyListening => hook?.WakeKeyListening==true;
     volatile bool wakeDisabled;
+    volatile bool wakeRecording;
     internal bool WakeSuppressedByKey => wakeDisabled;
+    internal bool WakeRecording => wakeRecording;
+    internal void SetWakeRecording(bool recording)
+    {
+        wakeRecording=recording;
+        hook?.SetWakeSuspended(recording);
+    }
     internal static bool ShouldSuppressDockByKey(bool wakeSuppressedByKey,bool menuOpen,bool busy,bool internalDragging,bool drawerVisible)=>
         wakeSuppressedByKey&&!menuOpen&&!busy&&!internalDragging&&!drawerVisible;
     bool SuppressDockActive => ShouldSuppressDockByKey(WakeSuppressedByKey,MenuOpen,Busy,InternalDragging,Drawer?.IsVisible==true);
@@ -378,7 +385,6 @@ internal sealed class Controller : IDisposable
     void T(string s){ lock(trail){ if(trail.Length>6000) trail.Remove(0,3000); trail.Append(Environment.TickCount64%100000).Append(':').Append(s).Append(' '); } }
     internal string Trail=>trail.ToString();
     internal string Diagnostics => $"box={senseBox}; showing={dockShowing}; events={PointerEvents}; callbacks={HookCallbacks}; hook={(hook?.Available==true)}; dpi={Scale}; sense={sense.Left},{sense.Top},{sense.Right},{sense.Bottom}; fullscreen={Native.Fullscreen(Screen)}; foreground={Native.Class(Native.GetForegroundWindow())}; pressed={Native.GetAsyncKeyState(1)}; since={intent.Since}";
-    public bool HotkeyAvailable { get; private set; }
     public bool HookAvailable => hook?.Available==true;
     internal void RecordSession(string[] args,bool testing)
     {
@@ -450,7 +456,6 @@ internal sealed class Controller : IDisposable
         Dock.Show();Dock.Hide();
         StartupStage("dock-created");
         HwndSource.FromHwnd(indicator.Handle).AddHook(Messages);
-        HotkeyAvailable=Native.RegisterHotKey(indicator.Handle,1,0x4003,0x20);
         trayIcon=TrayIcon();
         tray=new Forms.NotifyIcon { Icon=trayIcon,Text="MacDock",Visible=true };
         tray.MouseUp+=(_,e)=> { if(e.Button==Forms.MouseButtons.Right)ShowTrayMenu(); };
@@ -528,11 +533,9 @@ internal sealed class Controller : IDisposable
         DiagnosticsLog.Event("startup",new{milliseconds=Stopwatch.GetElapsedTime(startup).TotalMilliseconds,entries=Store.Data.Entries.Count,recovered=Store.Warning!=null});
         if(Store.Warning!=null)Notify(Store.Warning);
         if(!HookAvailable)Notify("鼠标唤醒不可用，请通过托盘打开抽屉。");
-        if(!HotkeyAvailable)Notify("Ctrl+Alt+空格已被占用；可通过白条悬停或托盘打开。");
     }
     nint Messages(nint hwnd,int msg,nint wp,nint lp,ref bool handled)
     {
-        if(msg==0x0312) { ToggleDrawer();handled=true; }
         if(taskbarCreated!=0&&msg==(int)taskbarCreated){RegisterShellChanges();StartWatchers();Position();CheckFullscreen();ScheduleSync();}
         if(msg is 0x02e0 or 0x001a or 0x007e) System.Windows.Application.Current.Dispatcher.BeginInvoke(Position);
         if(msg==0x001a)
@@ -665,7 +668,6 @@ internal sealed class Controller : IDisposable
 
     internal bool SetWakeShortcut(WakeShortcut? shortcut)
     {
-        if(shortcut is {UsesDrawerHotkey:true})return false;
         var data=Store.Data;
         var keys=shortcut?.ToArray();
         if(!SaveSetting(()=>(data.SuppressWakeKey,data.WakeShortcutKeys,data.WakeDisabled),
@@ -681,7 +683,7 @@ internal sealed class Controller : IDisposable
     {
         var dispatcher=System.Windows.Application.Current?.Dispatcher;
         dispatcher?.BeginInvoke(DispatcherPriority.Input,()=>{
-            if(disposed||!ReferenceEquals(shortcut,wakeShortcut)||Busy||IsSettingsWindow(foreground)||
+            if(disposed||wakeRecording||!ReferenceEquals(shortcut,wakeShortcut)||Busy||IsSettingsWindow(foreground)||
                 foreground!=Native.GetForegroundWindow())return;
             if(shortcut.IsSingle&&(Drawer?.TextInputActive==true||Native.ForegroundTextEditing()))return;
             if(SaveSetting(()=>Store.Data.WakeDisabled,value=>Store.Data.WakeDisabled=value,!wakeDisabled))
@@ -691,8 +693,11 @@ internal sealed class Controller : IDisposable
 
     void ApplyWakeMode()
     {
+        bool wasDisabled=wakeDisabled;
         wakeDisabled=Store.Data.WakeDisabled;
         wake.Stop();intent.Reset();
+        if(wakeDisabled&&!wasDisabled&&SuppressDockActive&&Dock.IsVisible&&!dockHiding&&!AutoHideBlocked)
+            HideDockAnimated();
         CheckFullscreen();
     }
 
@@ -884,7 +889,7 @@ internal sealed class Controller : IDisposable
         foreach(var key in keys)RequestIcon(key.Path,key.Px);
     }
 
-    void ReinstallPointerHook() { try { hook?.Dispose();hook=new PointerHook(OnPointerEvent,FilterPointer,wakeShortcut,OnWakeKeyPressed); } catch(Exception e) { Program.Log(e); } }
+    void ReinstallPointerHook() { try { hook?.Dispose();hook=new PointerHook(OnPointerEvent,FilterPointer,wakeShortcut,OnWakeKeyPressed);hook.SetWakeSuspended(wakeRecording); } catch(Exception e) { Program.Log(e); } }
     internal void TestReinstallHook()=>ReinstallPointerHook();
 
     // ---------------------------------------------------------------- placement
@@ -1037,8 +1042,8 @@ internal sealed class Controller : IDisposable
             GestureChecks.Trace?.Invoke("hook-pause", new { p.X, p.Y });
         }
         if(message is 0x202 or 0x205&&drawerMotion.InputPaused)System.Windows.Application.Current.Dispatcher.BeginInvoke(DispatcherPriority.Background,()=>ResumeDrawerMotion());
-        if(message==0x201&&!dockShowing&&!WakeSuppressedByKey&&senseBox.Contains(p.X,p.Y)&&Native.IsWindowVisible(indicatorNative)&&Native.GetWindowRect(indicatorNative,out var bar)&&Math.Abs(p.X-(bar.Left+bar.Right)/2)<=48*Scale&&Math.Abs(p.Y-(bar.Top+bar.Bottom)/2)<=6*Scale&&!Native.TaskbarPopupVisible())
-        {modal.CaptureWake();System.Windows.Application.Current.Dispatcher.BeginInvoke(()=>{if(!WakeSuppressedByKey&&!Native.TaskbarPopupVisible(WorkArea))Expand();});return true;}
+        if(message==0x201&&!dockShowing&&senseBox.Contains(p.X,p.Y)&&Native.IsWindowVisible(indicatorNative)&&Native.GetWindowRect(indicatorNative,out var bar)&&Math.Abs(p.X-(bar.Left+bar.Right)/2)<=48*Scale&&Math.Abs(p.Y-(bar.Top+bar.Bottom)/2)<=Math.Max(6*Scale,(bar.Bottom-bar.Top)/2.0)&&!Native.TaskbarPopupVisible())
+        {modal.CaptureWake();System.Windows.Application.Current.Dispatcher.BeginInvoke(()=>{if(!Native.TaskbarPopupVisible(WorkArea))Expand();});return true;}
         bool consumed = modal.Filter(p,message,data);
         if (message is 0x202 or 0x205 && dockShowing)
             System.Windows.Application.Current.Dispatcher.BeginInvoke(DispatcherPriority.Background, CheckDockLeave);
@@ -1130,8 +1135,7 @@ internal sealed class Controller : IDisposable
     // dragging a file onto the dock) the panel must stay open instead of collapsing underneath it.
     bool Protected(Native.Point p)
     {
-        if(SuppressDockActive)return false;
-        return DesktopResident || MenuOpen || Busy || InternalDragging || AutoHideBlocked ||
+        return (DesktopResident&&!WakeSuppressedByKey) || MenuOpen || Busy || InternalDragging || AutoHideBlocked ||
             ((Dock.KeyboardActive || retainedDockArea != null || sense.Contains(p) || Dock.Contains(p) || Drawer?.Contains(p) == true)&&!Native.TaskbarInputAt(p)) ||
             (Mouse.Captured is DependencyObject captured && Window.GetWindow(captured) == Dock);
     }
@@ -1267,7 +1271,7 @@ internal sealed class Controller : IDisposable
     }
     void RenderIndicator(double phase)
     {
-        if(indicatorSuppressed||WakeSuppressedByKey){if(indicator.IsVisible)indicator.Hide();return;}
+        if(indicatorSuppressed){if(indicator.IsVisible)indicator.Hide();return;}
         var p=WakeStrip.Pose(phase);
         if(indicator.Content is Border line){line.Width=86*Layout.DensityUnit*p.Length;line.Height=4.5*Layout.DensityUnit*p.Height;}
         indicator.Opacity=p.Alpha;
@@ -1289,7 +1293,7 @@ internal sealed class Controller : IDisposable
         {
             if(!Dock.IsVisible||dockHiding)ShowDockAnimated();
         }
-        else if(Dock.IsVisible&&!dockHiding&&!MenuOpen&&!Busy&&!InternalDragging&&Drawer?.IsVisible!=true&&(SuppressDockActive||!Native.GetCursorPos(out var pt)||!Protected(pt)))
+        else if(Dock.IsVisible&&!dockHiding&&!MenuOpen&&!Busy&&!InternalDragging&&Drawer?.IsVisible!=true&&(!Native.GetCursorPos(out var pt)||!Protected(pt)))
         {
             HideDockAnimated();
             intent.Reset();
@@ -2378,6 +2382,7 @@ internal sealed class Controller : IDisposable
         var completion=new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         window.Closed+=(_,_)=>{
             settingsWindow=null;settingsHandle=0;settingsClosed=null;
+            SetWakeRecording(false);
             UpdateModalRegions();
             completion.TrySetResult();
         };
@@ -2402,6 +2407,6 @@ internal sealed class Controller : IDisposable
         hook?.Dispose();shellChanges?.Dispose();foreach(var h in eventHooks)Native.UnhookWinEvent(h);
         Trace("input disposed");
         iconDispatcher.BeginInvokeShutdown(DispatcherPriority.Send);
-        Native.UnregisterHotKey(indicator.Handle,1);tray.Visible=false;tray.Dispose();trayIcon.Dispose();Trace("tray disposed");Drawer?.Close();Trace("drawer closed");Dock.Close();Trace("dock closed");indicator.Close();Trace("end");
+        tray.Visible=false;tray.Dispose();trayIcon.Dispose();Trace("tray disposed");Drawer?.Close();Trace("drawer closed");Dock.Close();Trace("dock closed");indicator.Close();Trace("end");
     }
 }

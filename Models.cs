@@ -120,7 +120,7 @@ public sealed class Store
         if(!new[]{"system","light","dark"}.Contains(c.Appearance))c.Appearance="system";
         if(!Native.IsWakeBindingKey(c.SuppressWakeKey))c.SuppressWakeKey=0;
         var shortcut=c.WakeShortcutKeys is {Length:>=2 and <=WakeShortcut.MaxKeys} keys ? WakeShortcut.Create(keys) : null;
-        c.WakeShortcutKeys=shortcut is {IsSingle:false,UsesDrawerHotkey:false} ? shortcut.ToArray() : null;
+        c.WakeShortcutKeys=shortcut is {IsSingle:false} ? shortcut.ToArray() : null;
         if(c.WakeShortcutKeys!=null)c.SuppressWakeKey=0;
         if(c.WakeShortcutKeys==null&&c.SuppressWakeKey==0)c.WakeDisabled=false;
         c.DockCapacity=Math.Clamp(c.DockCapacity,0,18);c.DrawerRows=Math.Clamp(c.DrawerRows,0,8);c.DrawerColumns=Math.Clamp(c.DrawerColumns,0,12);

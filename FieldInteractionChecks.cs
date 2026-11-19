@@ -369,13 +369,13 @@ internal static class FieldInteractionChecks
             {
                 await Move(wakePoint);
                 for(int i=0;i<5;i++){WakeKey(true);await Task.Delay(90);}
-                Check("Desktop key remains delivered during a held toggle",
-                    c.WakeSuppressedByKey&&Native.KeyHeld(0x77)&&!c.Dock.IsVisible);
+            Check("Desktop key remains delivered during a held toggle",
+                c.WakeSuppressedByKey&&Native.KeyHeld(0x77)&&!c.Dock.IsVisible&&Native.IsWindowVisible(c.IndicatorHandle));
             }
             finally{WakeKey(false);}
             await Move(outside);await Move(wakePoint);await Task.Delay(350);
             Check("Release leaves wake disabled and persists the configured binding",
-                c.WakeSuppressedByKey&&!c.Dock.IsVisible&&new Store(Path.GetDirectoryName(c.Store.FilePath)).Data is
+                c.WakeSuppressedByKey&&!c.Dock.IsVisible&&Native.IsWindowVisible(c.IndicatorHandle)&&new Store(Path.GetDirectoryName(c.Store.FilePath)).Data is
                     {WakeDisabled:true,SuppressWakeKey:0x77});
             WakeKey(true);WakeKey(false);
             await Until(()=>!c.WakeSuppressedByKey);

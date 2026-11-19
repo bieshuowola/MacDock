@@ -18,7 +18,7 @@ internal static class StartupChecks
             var deadline=Stopwatch.StartNew();
             while(c.Store.PinnedEntries().Any(e=>c.Icon(e.Path,c.Layout.Icon).Missing)&&deadline.ElapsedMilliseconds<15000)await Task.Delay(10);
             var frame=new TaskCompletionSource();EventHandler? handler=null;handler=(_,_)=>{CompositionTarget.Rendering-=handler;frame.TrySetResult();};CompositionTarget.Rendering+=handler;await frame.Task;await Task.Delay(20);
-            Mark("dock-complete",new{missing=c.Store.PinnedEntries().Count(e=>c.Icon(e.Path,c.Layout.Icon).Missing),hotkey=c.HotkeyAvailable});
+            Mark("dock-complete",new{missing=c.Store.PinnedEntries().Count(e=>c.Icon(e.Path,c.Layout.Icon).Missing)});
             var started=Now();c.ToggleDrawer();
             while(c.DrawerProgress<.999&&Now()-started<4000)await Task.Delay(10);
             deadline.Restart();while(c.Store.Data.Entries.Where(e=>e.InDrawer).Any(e=>c.Icon(e.Path,c.Layout.DrawerIcon).Loading)&&deadline.ElapsedMilliseconds<15000)await Task.Delay(10);

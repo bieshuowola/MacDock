@@ -5,8 +5,9 @@ internal static class WakeStripChecks
 {
     internal static async Task Run(Controller c)
     {
-        var dir=Environment.GetEnvironmentVariable("MACDOCK_TEST_RESULTS")!;Directory.CreateDirectory(dir);var records=new List<object>();var frames=new List<object>();Native.GetCursorPos(out var original);var sense=c.WakeBounds;Native.GetWindowRect(c.IndicatorHandle,out var baseline);double full=86*c.Layout.Unit;
-        void Check(string name,bool pass,object? detail=null){records.Add(new{name,pass,detail});if(!pass)throw new Exception(name);}
+        var dir=Environment.GetEnvironmentVariable("MACDOCK_TEST_RESULTS")!;Directory.CreateDirectory(dir);var records=new List<object>();var frames=new List<object>();Native.GetCursorPos(out var original);var sense=c.WakeBounds;Native.GetWindowRect(c.IndicatorHandle,out var baseline);double full=86*c.Layout.DensityUnit;
+        bool ok=true;
+        void Check(string name,bool pass,object? detail=null){if(!pass)ok=false;records.Add(new{name,pass,detail});if(!pass)throw new Exception(name);}
         try{
             Native.MovePointer(c.WorkArea.Left+100,c.WorkArea.Top+150);await Task.Delay(700);Check("resting strip retains original length and appearance",Math.Abs(c.IndicatorLength-full)<.01&&c.IndicatorAlpha==1&&Native.IsWindowVisible(c.IndicatorHandle));
             int fixedFrames=0;bool overlap=false,shortened=false;var watch=System.Diagnostics.Stopwatch.StartNew();c.DockAnimationFrame=(p,v)=>{Native.GetWindowRect(c.IndicatorHandle,out var box);if(box.Left==baseline.Left&&box.Top==baseline.Top&&box.Right==baseline.Right&&box.Bottom==baseline.Bottom)fixedFrames++;if(p>0&&p<.5&&c.IndicatorAlpha>0&&c.Dock.IsVisible)overlap=true;if(c.IndicatorLength<full*.75&&c.IndicatorLength>full*.05&&c.IndicatorAlpha>0)shortened=true;frames.Add(new{ms=watch.Elapsed.TotalMilliseconds,p,v,length=c.IndicatorLength,alpha=c.IndicatorAlpha,visible=Native.IsWindowVisible(c.IndicatorHandle)});};
@@ -18,7 +19,7 @@ internal static class WakeStripChecks
             if(c.DesktopResident){Native.MovePointer(c.WorkArea.Left+100,c.WorkArea.Top+150);await Task.Delay(500);Check("desktop-resident mode keeps Dock visible",c.Dock.IsVisible);}
             else{Check("maximized/fullscreen skips forced residency",true,"DesktopResident=false in current desktop environment");}
             c.AutoHideDock=true;c.CheckFullscreen();await Task.Delay(500);
-        }catch(Exception e){records.Add(new{name="error",pass=false,detail=(object)e.ToString()});}
-        finally{c.DockAnimationFrame=null;Native.TestButton(false);Native.MovePointer(original.X,original.Y);File.WriteAllText(Path.Combine(dir,"wake-strip.json"),JsonSerializer.Serialize(records,new JsonSerializerOptions{WriteIndented=true}));File.WriteAllText(Path.Combine(dir,"wake-strip-frames.json"),JsonSerializer.Serialize(frames,new JsonSerializerOptions{WriteIndented=true}));System.Windows.Application.Current.Shutdown();}
+        }catch(Exception e){ok=false;records.Add(new{name="error",pass=false,detail=(object)e.ToString()});}
+        finally{c.DockAnimationFrame=null;Native.TestButton(false);Native.MovePointer(original.X,original.Y);File.WriteAllText(Path.Combine(dir,"wake-strip.json"),JsonSerializer.Serialize(records,new JsonSerializerOptions{WriteIndented=true}));File.WriteAllText(Path.Combine(dir,"wake-strip-frames.json"),JsonSerializer.Serialize(frames,new JsonSerializerOptions{WriteIndented=true}));System.Windows.Application.Current.Shutdown(ok?0:1);}
     }
 }

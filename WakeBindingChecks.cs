@@ -7,6 +7,7 @@ using System.Text;
 using System.Text.Json;
 using System.Windows;
 using System.Windows.Controls;
+using System.Windows.Controls.Primitives;
 using System.Windows.Input;
 using System.Windows.Interop;
 
@@ -312,6 +313,88 @@ internal static class WakeBindingChecks
 
             c.SetSuppressWakeKey(0);
             Check("clearing binding removes keyboard hook and restores wake",await Wait(()=>!c.WakeKeyListening)&&!c.WakeSuppressedByKey);
+
+            // Real Ctrl+Alt+Space unbound check, settings recording, hold/repeat isolation, wake strip decoupling, and focus switch
+            await Focus(receiver.Hwnd);
+            string plainKeysLog=Path.Combine(receiver.Folder,"receiver-keys.txt");
+            int spaceCountBefore=Read(plainKeysLog).Split('\n').Count(x=>x is "100:20" or "104:20");
+            Key(0x11,true,0x1D);Key(0x12,true,0x38);Tap(0x20,0x39);Key(0x12,false,0x38);Key(0x11,false,0x1D);
+            await Task.Delay(220);
+            Check("unbound Ctrl+Alt+Space does not open drawer and reaches foreground",
+                c.Drawer?.IsVisible!=true&&Read(plainKeysLog).Split('\n').Count(x=>x is "100:20" or "104:20")>spaceCountBefore);
+
+            Window? settingsWindow=null;
+            var settingsReady=new TaskCompletionSource<Window>();
+            _ = c.ShowSettings(w=>settingsReady.TrySetResult(w));
+            settingsWindow=await settingsReady.Task;
+            await Task.Delay(200);
+            static IEnumerable<DependencyObject> WalkVisual(DependencyObject node)
+            {
+                yield return node;
+                foreach(var child in LogicalTreeHelper.GetChildren(node).OfType<DependencyObject>())
+                    foreach(var nested in WalkVisual(child))yield return nested;
+            }
+            var bindBtn=WalkVisual(settingsWindow).OfType<Button>().Single(b=>System.Windows.Automation.AutomationProperties.GetName(b)=="临时关闭 MacDock");
+            await Focus(new WindowInteropHelper(settingsWindow).Handle);
+            bindBtn.RaiseEvent(new RoutedEventArgs(ButtonBase.ClickEvent,bindBtn));
+            Check("settings window enters wake recording mode",await Wait(()=>c.WakeRecording));
+            Key(0x11,true,0x1D);await Task.Delay(35);
+            Key(0x12,true,0x38);await Task.Delay(35);
+            Key(0x20,true,0x39);await Task.Delay(45);
+            Check("recording Ctrl+Alt+Space never opens drawer",c.Drawer?.IsVisible!=true);
+            Key(0x20,false,0x39);await Task.Delay(35);
+            Key(0x12,false,0x38);await Task.Delay(35);
+            Key(0x11,false,0x1D);
+            Check("real Ctrl+Alt+Space binds cleanly in settings",
+                await Wait(()=>!c.WakeRecording&&(string?)bindBtn.Content=="Ctrl + Alt + Space")&&
+                c.Drawer?.IsVisible!=true&&!c.WakeSuppressedByKey&&
+                new Store(Path.GetDirectoryName(c.Store.FilePath)).Data.WakeShortcutKeys?.SequenceEqual(new[]{0x11,0x12,0x20})==true);
+            settingsWindow.Close();
+            await Wait(()=>!settingsWindow.IsVisible);
+
+            await Focus(receiver.Hwnd);
+            var safeOut=new Native.Point(c.WorkArea.Left+100,c.WorkArea.Top+150);
+            Native.MovePointer(safeOut.X,safeOut.Y);
+            await Wait(()=>!c.Dock.IsVisible&&Native.IsWindowVisible(c.IndicatorHandle)&&c.IndicatorAlpha==1);
+            Key(0x11,true,0x1D);Key(0x12,true,0x38);
+            for(int r=0;r<4;r++){Key(0x20,true,0x39);await Task.Delay(60);}
+            Key(0x20,false,0x39);Key(0x12,false,0x38);Key(0x11,false,0x1D);
+            Check("real Ctrl+Alt+Space hold toggles temporary disable once and keeps strip visible",
+                await Wait(()=>c.WakeSuppressedByKey)&&Native.IsWindowVisible(c.IndicatorHandle)&&c.IndicatorAlpha==1);
+
+            var senseMid=new Native.Point((c.WakeBounds.Left+c.WakeBounds.Right)/2,(c.WakeBounds.Top+c.WakeBounds.Bottom)/2);
+            Native.MovePointer(senseMid.X,senseMid.Y);
+            await Task.Delay(380);
+            Check("hover wake stays disabled during temporary disable while strip stays visible",
+                !c.Dock.IsVisible&&Native.IsWindowVisible(c.IndicatorHandle)&&c.IndicatorAlpha==1);
+
+            Native.GetWindowRect(c.IndicatorHandle,out var stripRect);
+            Native.MovePointer((stripRect.Left+stripRect.Right)/2,(stripRect.Top+stripRect.Bottom)/2);
+            Native.TestButton(true);await Task.Delay(35);Native.TestButton(false);
+            Check("clicking bottom strip wakes Dock during temporary disable",await Wait(()=>c.Dock.IsVisible));
+            await Task.Delay(380);
+            Check("Dock woken by strip click stays open while pointer remains on Dock",c.Dock.IsVisible);
+            Native.MovePointer(safeOut.X,safeOut.Y);
+            Check("leaving Dock collapses back to visible strip during temporary disable",
+                await Wait(()=>!c.Dock.IsVisible&&Native.IsWindowVisible(c.IndicatorHandle)&&c.IndicatorAlpha==1));
+
+            await Focus(ime.Hwnd);
+            bool stripBlinked=false;
+            for(int i=0;i<6;i++)
+            {
+                if(i==1){Key(0x11,true,0x1D);Key(0x12,true,0x38);Tap(0x20,0x39);Key(0x12,false,0x38);Key(0x11,false,0x1D);}
+                if(!Native.IsWindowVisible(c.IndicatorHandle)||c.IndicatorAlpha<.95)stripBlinked=true;
+                await Task.Delay(45);
+            }
+            Check("pressing Ctrl+Alt+Space after focus switch restores auto-wake without strip flicker",
+                await Wait(()=>!c.WakeSuppressedByKey)&&!stripBlinked&&c.IndicatorAlpha==1);
+            Native.MovePointer(senseMid.X,senseMid.Y);
+            Check("hover auto-wake works again after restore",await Wait(()=>c.Dock.IsVisible));
+            Native.MovePointer(safeOut.X,safeOut.Y);
+            await Wait(()=>!c.Dock.IsVisible);
+            c.SetWakeShortcut(null);
+            await Wait(()=>!c.WakeKeyListening);
+
             var game=await Receiver("full");
             Check("fullscreen surrogate owns the foreground",Native.Fullscreen(c.Screen));
             c.SetSuppressWakeKey(Binding);

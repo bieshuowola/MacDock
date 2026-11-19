@@ -106,11 +106,12 @@ internal static class SettingsReleaseChecks
                     Check("open mode double-click persists immediately",new Store(Path.GetDirectoryName(c.Store.FilePath)).Data.DoubleClickToOpen);
                     openMode.SelectedIndex=0;
                     Check("open mode single-click restores immediately",!new Store(Path.GetDirectoryName(c.Store.FilePath)).Data.DoubleClickToOpen);
-                    var bindKey=Named<Button>("按键切换 Dock 唤出");
-                    var clearKey=Named<Button>("清除屏蔽唤醒按键");
-                    Check("suppress wake key starts unbound",!clearKey.IsEnabled&&c.Store.Data.SuppressWakeKey==0&&(string?)bindKey.Content=="待绑定");
+                    var bindKey=Named<Button>("临时关闭 MacDock");
+                    var clearKey=Named<Button>("清除临时关闭快捷键");
+                    Check("temporary disable description visible",nodes.OfType<TextBlock>().Any(t=>t.Text=="设置一个快捷键，按下后临时关闭 MacDock 的自动弹出功能，再次按下即可恢复。MacDock 仍在后台运行，底部唤醒小横条保持可用。"));
+                    Check("suppress wake key starts unbound",!clearKey.IsEnabled&&c.Store.Data.SuppressWakeKey==0&&(string?)bindKey.Content=="未设置快捷键"&&!c.WakeRecording);
                     Press(bindKey);
-                    Check("suppress wake key enters recording prompt",(bindKey.Content as string)?.Contains("请按")==true);
+                    Check("suppress wake key enters recording prompt",(bindKey.Content as string)?.Contains("请按")==true&&c.WakeRecording);
                     if(PresentationSource.FromVisual(w) is PresentationSource ps)
                     {
                         void Record(System.Windows.Input.Key key,bool down=true)=>w.RaiseEvent(new System.Windows.Input.KeyEventArgs(
@@ -119,7 +120,7 @@ internal static class SettingsReleaseChecks
                         Record(System.Windows.Input.Key.Pause);Record(System.Windows.Input.Key.Pause,false);
                         Check("Pause is rejected without setting a binding",c.Store.Data.SuppressWakeKey==0&&(string?)bindKey.Content=="不支持此键，请重试");
                         Record(System.Windows.Input.Key.F8);Record(System.Windows.Input.Key.F8,false);
-                        Check("suppress wake key records and persists",new Store(Path.GetDirectoryName(c.Store.FilePath)).Data.SuppressWakeKey==0x77&&clearKey.IsEnabled);
+                        Check("suppress wake key records and persists",new Store(Path.GetDirectoryName(c.Store.FilePath)).Data.SuppressWakeKey==0x77&&clearKey.IsEnabled&&!c.WakeRecording);
                         Press(bindKey);
                         var keys=new[]{System.Windows.Input.Key.RightCtrl,System.Windows.Input.Key.LeftAlt,System.Windows.Input.Key.LeftShift,System.Windows.Input.Key.F9};
                         foreach(var key in keys)Record(key);
@@ -133,9 +134,17 @@ internal static class SettingsReleaseChecks
                         Check("four keys replace the shortcut and persist",
                             new Store(Path.GetDirectoryName(c.Store.FilePath)).Data.WakeShortcutKeys?.SequenceEqual(new[]{0x11,0x12,0x10,0x78})==true&&
                             (string?)bindKey.Content=="Ctrl + Alt + Shift + F9");
+                        Press(bindKey);
+                        Check("recording isolates active hook while capturing Ctrl+Alt+Space",c.WakeRecording);
+                        var chord=new[]{System.Windows.Input.Key.LeftCtrl,System.Windows.Input.Key.LeftAlt,System.Windows.Input.Key.Space};
+                        foreach(var key in chord)Record(key);
+                        foreach(var key in chord.Reverse())Record(key,false);
+                        Check("Ctrl+Alt+Space binds without opening drawer or toggling wake",
+                            new Store(Path.GetDirectoryName(c.Store.FilePath)).Data.WakeShortcutKeys?.SequenceEqual(new[]{0x11,0x12,0x20})==true&&
+                            (string?)bindKey.Content=="Ctrl + Alt + Space"&&!c.WakeRecording&&c.Drawer?.IsVisible!=true&&!c.WakeSuppressedByKey);
                         Press(clearKey);
                         var cleared=new Store(Path.GetDirectoryName(c.Store.FilePath)).Data;
-                        Check("suppress wake key clears and persists",cleared.SuppressWakeKey==0&&cleared.WakeShortcutKeys==null&&!clearKey.IsEnabled&&(string?)bindKey.Content=="待绑定");
+                        Check("suppress wake key clears and persists",cleared.SuppressWakeKey==0&&cleared.WakeShortcutKeys==null&&!clearKey.IsEnabled&&(string?)bindKey.Content=="未设置快捷键");
                     }
                     using var bitmap=new System.Drawing.Bitmap((int)Math.Ceiling(w.ActualWidth*c.Scale),(int)Math.Ceiling(w.ActualHeight*c.Scale));
                     var point=w.PointToScreen(new Point());

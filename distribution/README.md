@@ -4,7 +4,7 @@
 
 面向 Windows 11 的轻量级底部 Dock 与真实桌面抽屉工具
 
-[![Release](https://img.shields.io/badge/release-v1.9.9-0078D4?style=flat-square)](https://github.com/bieshuowola/MacDock/releases/latest)
+[![Release](https://img.shields.io/badge/release-v1.9.9.2-0078D4?style=flat-square)](https://github.com/bieshuowola/MacDock/releases/latest)
 [![Platform](https://img.shields.io/badge/platform-Windows%2011%20x64-lightgrey?style=flat-square)](https://github.com/bieshuowola/MacDock/releases/latest)
 
 [下载最新版](https://github.com/bieshuowola/MacDock/releases/latest) · [使用指南](GUIDE.md) · [版本记录](CHANGELOG.md)
@@ -26,12 +26,12 @@
 - **原生键鼠与外壳菜单**：支持 `F2` 重命名、`Delete` / `Shift+Delete` 删除、`Ctrl+C` / `Ctrl+X` / `Ctrl+V`、`Alt+双击` / `Alt+Enter` 打开原生文件属性页，以及无转圈的 Windows 原生右键扩展菜单。
 
 ### 2. 流畅收纳过渡与交互细节
-- **抽屉展开与收起**：点击 Dock 四窗格按钮或按 `Ctrl+Alt+Space`，抽屉从锚点平滑展开与收起，动画过程支持随时反向。
+- **抽屉展开与收起**：点击 Dock 四窗格按钮打开或收起抽屉，抽屉从锚点平滑展开与收起，动画过程支持随时反向。
 - **底部 Dock 栏**：支持指针悬停放大、拖拽重排、图标「单击打开 / 双击打开」切换（默认单击），以及图标快照缓存（刷新或重载期间保留最后一次有效图标）。
 
-### 3. 智能场景避让与按键屏蔽
+### 3. 智能场景避让与临时关闭 MacDock
 - **空桌面常驻与自动隐藏**：桌面无最大化或全屏窗口覆盖工作区时 Dock 保持常驻；存在最大化或全屏程序时自动平滑收起，移动指针至底部唤醒条即可唤出。
-- **自定义按住屏蔽键**：支持在设置中绑定任意屏蔽键（如 `~`），按住期间立即收起 Dock 并拦截底部唤醒，松开后自动恢复。
+- **临时关闭 MacDock**：支持在设置中绑定单键或最多四键组合快捷键（首次安装默认未设置），按下后临时关闭自动弹出功能，再次按下恢复正常；临时关闭期间 MacDock 继续后台运行，底部唤醒小横条保持可用。
 
 ### 4. 轻量零侵入
 - 支持通过当前用户级登录计划任务实现快速开机自启（无需提权，异常时自动降级为注册表启动项）。

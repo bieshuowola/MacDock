@@ -7,7 +7,7 @@
     <ApplicationIcon>Assets\Brand\MacDock.ico</ApplicationIcon>
     <WindowsSdkPackageVersion>10.0.19041.56</WindowsSdkPackageVersion><RollForward>LatestMajor</RollForward>
     <DefaultItemExcludes>$(DefaultItemExcludes);.scratch/**;backup/**</DefaultItemExcludes>
-    <Version>1.9.9.1</Version><InformationalVersion>$(Version)</InformationalVersion><IncludeSourceRevisionInInformationalVersion>false</IncludeSourceRevisionInInformationalVersion><AssemblyName>MacDock</AssemblyName>
+    <Version>1.9.9.2</Version><InformationalVersion>$(Version)</InformationalVersion><IncludeSourceRevisionInInformationalVersion>false</IncludeSourceRevisionInInformationalVersion><AssemblyName>MacDock</AssemblyName>
   </PropertyGroup>
   <PropertyGroup Condition="'$(EnableMacDockExperienceChecks)' == 'true'">
     <DefineConstants>$(DefineConstants);MACDOCK_EXPERIENCE_CHECKS</DefineConstants>
