@@ -32,7 +32,7 @@ function Get-EmbeddedUpdateMetadata([IO.Stream]$AssemblyStream) {
 }
 
 $setupFile = Get-Item -LiteralPath $Setup
-$nameMatch = [regex]::Match($setupFile.Name, '^MacDock-(\d+\.\d+\.\d+)-win-x64-Setup\.exe$')
+$nameMatch = [regex]::Match($setupFile.Name, '^MacDock-(\d+(?:\.\d+){2,3})-win-x64-Setup\.exe$')
 if (!$nameMatch.Success) { throw 'Unexpected setup filename.' }
 $version = $nameMatch.Groups[1].Value
 $directory = $setupFile.DirectoryName

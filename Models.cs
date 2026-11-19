@@ -49,6 +49,8 @@ public sealed class Config
     public bool AutoCheckUpdates {get;set;}=true;
     public bool DoubleClickToOpen { get; set; }
     public int SuppressWakeKey { get; set; }
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public int[]? WakeShortcutKeys { get; set; }
     public bool WakeDisabled { get; set; }
     public int DockCapacity { get; set; }
     public int DrawerRows { get; set; }
@@ -117,7 +119,10 @@ public sealed class Store
         if (!new[] { "自定义", "按类型", "首字母" }.Contains(c.Mode)) c.Mode = "自定义";
         if(!new[]{"system","light","dark"}.Contains(c.Appearance))c.Appearance="system";
         if(!Native.IsWakeBindingKey(c.SuppressWakeKey))c.SuppressWakeKey=0;
-        if(c.SuppressWakeKey==0)c.WakeDisabled=false;
+        var shortcut=c.WakeShortcutKeys is {Length:>=2 and <=WakeShortcut.MaxKeys} keys ? WakeShortcut.Create(keys) : null;
+        c.WakeShortcutKeys=shortcut is {IsSingle:false,UsesDrawerHotkey:false} ? shortcut.ToArray() : null;
+        if(c.WakeShortcutKeys!=null)c.SuppressWakeKey=0;
+        if(c.WakeShortcutKeys==null&&c.SuppressWakeKey==0)c.WakeDisabled=false;
         c.DockCapacity=Math.Clamp(c.DockCapacity,0,18);c.DrawerRows=Math.Clamp(c.DrawerRows,0,8);c.DrawerColumns=Math.Clamp(c.DrawerColumns,0,12);
         if (c.Version < 3) { if(!File.Exists(p+".before-v3"))File.Copy(p,p+".before-v3");Migrate(c); }
         return c;

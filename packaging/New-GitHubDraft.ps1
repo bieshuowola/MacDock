@@ -9,7 +9,7 @@ if(!$Authorized){throw 'Obtain explicit authorization for the public distributio
 if($Repository -notmatch '^[A-Za-z0-9][A-Za-z0-9-]*/[A-Za-z0-9_.-]+$'){throw 'Invalid repository.'}
 $root=(Resolve-Path -LiteralPath $ArtifactFolder).Path
 $build=Get-Content -LiteralPath (Join-Path $root 'local-build.json') -Raw|ConvertFrom-Json
-if($build.testIdentity -or !$build.channelConfigured -or $build.releaseRepository -cne $Repository -or $build.version -notmatch '^\d+\.\d+\.\d+$'){throw 'Build is not configured for this public distribution channel.'}
+if($build.testIdentity -or !$build.channelConfigured -or $build.releaseRepository -cne $Repository -or $build.version -notmatch '^\d+(\.\d+){2,3}$'){throw 'Build is not configured for this public distribution channel.'}
 $repoJson=& gh repo view $Repository --json visibility,defaultBranchRef
 if($LASTEXITCODE){throw 'Unable to inspect the public repository.'}
 $repo=$repoJson|ConvertFrom-Json

@@ -139,7 +139,27 @@ internal static class WakeBindingChecks
         async Task Focus(nint hwnd)
         {
             Native.ActivateWindow(hwnd);
-            if(!await Wait(()=>Native.GetForegroundWindow()==hwnd))throw new InvalidOperationException("Could not foreground test window");
+            if(await Wait(()=>Native.GetForegroundWindow()==hwnd,500))return;
+            if(Native.GetWindowRect(hwnd,out var bounds))
+            {
+                var x=(bounds.Left+bounds.Right)/2;
+                var y=(bounds.Top+bounds.Bottom)/2;
+                const int noMoveOrActivate=0x0013;
+                Native.SetWindowPos(hwnd,-1,0,0,0,0,noMoveOrActivate);
+                try
+                {
+                    Native.MovePointer(x,y);
+                    var hit=Native.WindowFromPoint(new Native.Point(x,y));
+                    if(hit==hwnd||Native.GetAncestor(hit,2)==hwnd)
+                    {
+                        Native.TestButton(true);
+                        Native.TestButton(false);
+                    }
+                    if(await Wait(()=>Native.GetForegroundWindow()==hwnd,900))return;
+                }
+                finally{Native.SetWindowPos(hwnd,-2,0,0,0,0,noMoveOrActivate);}
+            }
+            throw new InvalidOperationException($"Could not foreground test window. Foreground class: {Native.Class(Native.GetForegroundWindow())}");
         }
         async Task<(string Folder,nint Hwnd)> Receiver(string mode)
         {
@@ -191,6 +211,30 @@ internal static class WakeBindingChecks
             Check("reinstall during hold and autorepeat toggle only once",c.WakeSuppressedByKey&&repeatedEvents);
             Tap(Binding,0x42);
             Check("next down works after release and reinstall",await Wait(()=>!c.WakeSuppressedByKey));
+            var fourKeys=WakeShortcut.Create(new[]{0x11,0x12,0x10,(int)Binding})!;
+            Check("four-key shortcut is configured and loaded",c.SetWakeShortcut(fourKeys)&&
+                new Store(Path.GetDirectoryName(c.Store.FilePath)).Data.WakeShortcutKeys?.SequenceEqual(fourKeys.ToArray())==true);
+            try
+            {
+                Key(0x11,true,0x1D);Key(0x12,true,0x38);Key(Binding,true,0x42);
+                Key(0x41,true,0x1E);Key(0x10,true,0x2A);
+                await Task.Delay(120);
+                Check("a fifth held key prevents switching",!c.WakeSuppressedByKey);
+                Key(0x41,false,0x1E);Key(0x10,false,0x2A);
+                Key(0x10,true,0x2A);
+                Check("last modifier completes a four-key chord in an independent window",await Wait(()=>c.WakeSuppressedByKey));
+                Key(Binding,true,0x42);Key(0x10,true,0x2A);
+                await Task.Delay(120);
+                Check("four-key repeats do not switch a second time",c.WakeSuppressedByKey);
+                Key(Binding,false,0x42);
+                Key(Binding,true,0x42);
+                Check("repress after release switches while modifiers stay held",await Wait(()=>!c.WakeSuppressedByKey));
+            }
+            finally
+            {
+                Key(0x41,false,0x1E);Key(Binding,false,0x42);Key(0x10,false,0x2A);
+                Key(0x12,false,0x38);Key(0x11,false,0x1D);
+            }
             var ime=await Receiver("ime");
             nativeLog=Path.Combine(ime.Folder,"receiver-keys.txt");
             string typed=Path.Combine(ime.Folder,"receiver-text.txt");
@@ -300,6 +344,19 @@ internal static class WakeBindingChecks
             Check("another press and release pass through with no listener",nextDown&&
                 await Wait(()=>!Native.KeyHeld(Binding)&&(Read(gameLog).Split('\n').Count(x=>x=="101:77")>=releases+2||
                     Read(rawLog).Split('\n').Count(x=>x=="101:77")>=releases+2))&&!c.WakeSuppressedByKey);
+            var twoKeys=WakeShortcut.Create(new[]{0x11,(int)Binding})!;
+            c.SetWakeShortcut(twoKeys);await Wait(()=>c.WakeKeyListening);
+            int rawReleases=Read(rawLog).Split('\n').Count(x=>x=="101:77");
+            try
+            {
+                Key(0x11,true,0x1D);Tap(Binding,0x42);
+                Check("Ctrl shortcut switches in borderless fullscreen",await Wait(()=>c.WakeSuppressedByKey)&&
+                    Native.GetForegroundWindow()==game.Hwnd);
+                if(await Wait(()=>Read(rawLog).Split('\n').Count(x=>x=="101:77")>rawReleases,1200))
+                    Check("bound chord reaches the fullscreen Raw Input receiver",true);
+                else Boundary("Raw Input chord","The test environment did not report another injected raw release.");
+            }
+            finally{Key(0x11,false,0x1D);c.SetWakeShortcut(null);}
         }
         catch(Exception error){results.Add(new{name="failure",pass=false,detail=error.ToString()});exit=1;}
         finally

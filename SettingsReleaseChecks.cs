@@ -42,7 +42,9 @@ internal static class SettingsReleaseChecks
             Check("real tray popup has only the three product actions",tray.IsOpen&&tray.Items.OfType<MenuItem>().Select(m=>m.Header as string).SequenceEqual(new[]{"设置","检查更新","退出 MacDock"}));
             tray.IsOpen=false;
 
-            c.ShowSettings(async w=>
+            c.ToggleDrawer();
+            await Task.Delay(450);
+            await c.ShowSettings(async w=>
             {
                 try
                 {
@@ -51,6 +53,26 @@ internal static class SettingsReleaseChecks
                     T Named<T>(string name) where T:FrameworkElement=>nodes.OfType<T>().Single(n=>System.Windows.Automation.AutomationProperties.GetName(n)==name);
                     Button Button(string name)=>nodes.OfType<Button>().Single(b=>b.Content as string==name);
                     void Press(ButtonBase b)=>b.RaiseEvent(new RoutedEventArgs(ButtonBase.ClickEvent,b));
+                    Check("opening settings keeps the existing drawer and input enabled",
+                        c.Drawer is {IsVisible:true,IsEnabled:true}&&c.Dock.IsEnabled&&w.IsActive);
+                    var gateway=c.Dock.GatewayCenter;
+                    Native.MovePointer(gateway.X,gateway.Y);
+                    Native.TestButton(true);
+                    await Task.Delay(35);
+                    Native.TestButton(false);
+                    await Task.Delay(550);
+                    Check("Dock button closes the drawer while settings stays open",c.Drawer?.IsVisible==false&&w.IsVisible);
+                    c.ToggleDrawer();await Task.Delay(500);
+                    w.Activate();
+                    await Task.Delay(170);
+                    Check("activating settings keeps the open drawer available",c.Drawer?.IsVisible==true&&w.IsActive);
+                    Native.MovePointer(c.WorkArea.Left+20,c.WorkArea.Top+100);
+                    Native.TestButton(true);
+                    await Task.Delay(35);
+                    Native.TestButton(false);
+                    await Task.Delay(550);
+                    Check("outside click dismisses the drawer while settings stays usable",c.Drawer?.IsVisible==false&&w.IsVisible&&w.IsEnabled);
+                    w.Activate();
                     var column=Named<ComboBox>("抽屉列数");
                     var save=Button("保存布局");
                     int original=c.Store.Data.DrawerColumns;
@@ -91,26 +113,41 @@ internal static class SettingsReleaseChecks
                     Check("suppress wake key enters recording prompt",(bindKey.Content as string)?.Contains("请按")==true);
                     if(PresentationSource.FromVisual(w) is PresentationSource ps)
                     {
-                        void Record(System.Windows.Input.Key key)=>w.RaiseEvent(new System.Windows.Input.KeyEventArgs(
-                            System.Windows.Input.Keyboard.PrimaryDevice,ps,0,key){RoutedEvent=System.Windows.Input.Keyboard.PreviewKeyDownEvent});
-                        Record(System.Windows.Input.Key.Pause);
+                        void Record(System.Windows.Input.Key key,bool down=true)=>w.RaiseEvent(new System.Windows.Input.KeyEventArgs(
+                            System.Windows.Input.Keyboard.PrimaryDevice,ps,0,key){RoutedEvent=down?
+                                System.Windows.Input.Keyboard.PreviewKeyDownEvent:System.Windows.Input.Keyboard.PreviewKeyUpEvent});
+                        Record(System.Windows.Input.Key.Pause);Record(System.Windows.Input.Key.Pause,false);
                         Check("Pause is rejected without setting a binding",c.Store.Data.SuppressWakeKey==0&&(string?)bindKey.Content=="不支持此键，请重试");
-                        Record(System.Windows.Input.Key.F8);
+                        Record(System.Windows.Input.Key.F8);Record(System.Windows.Input.Key.F8,false);
                         Check("suppress wake key records and persists",new Store(Path.GetDirectoryName(c.Store.FilePath)).Data.SuppressWakeKey==0x77&&clearKey.IsEnabled);
+                        Press(bindKey);
+                        var keys=new[]{System.Windows.Input.Key.RightCtrl,System.Windows.Input.Key.LeftAlt,System.Windows.Input.Key.LeftShift,System.Windows.Input.Key.F9};
+                        foreach(var key in keys)Record(key);
+                        Record(System.Windows.Input.Key.A);
+                        Record(System.Windows.Input.Key.A,false);
+                        foreach(var key in keys)Record(key,false);
+                        Check("five keys leave the existing shortcut intact",c.Store.Data.SuppressWakeKey==0x77&&
+                            (string?)bindKey.Content=="最多支持四键，请重试");
+                        foreach(var key in keys)Record(key);
+                        foreach(var key in keys.Reverse())Record(key,false);
+                        Check("four keys replace the shortcut and persist",
+                            new Store(Path.GetDirectoryName(c.Store.FilePath)).Data.WakeShortcutKeys?.SequenceEqual(new[]{0x11,0x12,0x10,0x78})==true&&
+                            (string?)bindKey.Content=="Ctrl + Alt + Shift + F9");
                         Press(clearKey);
-                        Check("suppress wake key clears and persists",new Store(Path.GetDirectoryName(c.Store.FilePath)).Data.SuppressWakeKey==0&&!clearKey.IsEnabled&&(string?)bindKey.Content=="待绑定");
+                        var cleared=new Store(Path.GetDirectoryName(c.Store.FilePath)).Data;
+                        Check("suppress wake key clears and persists",cleared.SuppressWakeKey==0&&cleared.WakeShortcutKeys==null&&!clearKey.IsEnabled&&(string?)bindKey.Content=="待绑定");
                     }
                     using var bitmap=new System.Drawing.Bitmap((int)Math.Ceiling(w.ActualWidth*c.Scale),(int)Math.Ceiling(w.ActualHeight*c.Scale));
                     var point=w.PointToScreen(new Point());
                     using(var graphics=System.Drawing.Graphics.FromImage(bitmap))graphics.CopyFromScreen((int)point.X,(int)point.Y,0,0,bitmap.Size);
                     bitmap.Save(Path.Combine(output,"settings-release.png"));
-                    using var key=ECDsa.Create(ECCurve.NamedCurves.nistP256);
+                    using var signingKey=ECDsa.Create(ECCurve.NamedCurves.nistP256);
                     var current=Version.Parse(ReleaseUpdates.CurrentVersion);
                     string next=new Version(current.Major,current.Minor,current.Build+1).ToString(3);
                     byte[] manifest=JsonSerializer.SerializeToUtf8Bytes(new ReleaseUpdates.Manifest(next,$"MacDock-{next}-win-x64-Setup.exe",1,new string('a',64),"测试版更新说明",BuildSequence:long.MaxValue,BuildFingerprint:Guid.NewGuid().ToString("N"),PayloadSha256:new string('b',64)));
-                    byte[] signature=key.SignData(manifest,HashAlgorithmName.SHA256,DSASignatureFormat.IeeeP1363FixedFieldConcatenation);
+                    byte[] signature=signingKey.SignData(manifest,HashAlgorithmName.SHA256,DSASignatureFormat.IeeeP1363FixedFieldConcatenation);
                     using var http=new HttpClient(new Feed(manifest,signature,next));
-                    await c.CheckUpdates(false,new ReleaseUpdates("fixture/MacDock",key.ExportSubjectPublicKeyInfo(),http));
+                    await c.CheckUpdates(false,new ReleaseUpdates("fixture/MacDock",signingKey.ExportSubjectPublicKeyInfo(),http));
                     Check("signed update changes both settings and tray state",Button("立即更新").IsEnabled&&c.UpdateMenuLabel==$"发现新版本 · v{next}"&&c.Updates.Notes=="测试版更新说明");
                     var persisted=JsonSerializer.Deserialize<Controller.UpdateStatus>(File.ReadAllText(Path.Combine(Path.GetDirectoryName(c.Store.FilePath)!,"update-status.json")));
                     Check("successful detection persists a usable check time",persisted?.Checked!=null&&persisted.Version==next);

@@ -78,6 +78,20 @@ internal static class UpdateChecks
             wrongRedirect=false;offline=true;
             Check("offline failure returned without an installer",await Rejected(()=>updates.Check(old,CancellationToken.None)));
             Check("no partial or unverified installers left",Directory.GetFiles(cache,"*",SearchOption.AllDirectories).SequenceEqual(new[]{path}));
+            offline=false;
+            const string fourthPart="1.9.9.1";
+            tag="v"+fourthPart;
+            manifest=JsonSerializer.SerializeToUtf8Bytes(new ReleaseUpdates.Manifest(fourthPart,
+                $"MacDock-{fourthPart}-win-x64-Setup.exe",payload.Length,Convert.ToHexString(SHA256.HashData(payload)),
+                "Fixture",BuildSequence:20,BuildFingerprint:fingerprint,PayloadSha256:new string('a',64)));
+            signature=key.SignData(manifest,HashAlgorithmName.SHA256,DSASignatureFormat.IeeeP1363FixedFieldConcatenation);
+            var fourthPartUpdate=await updates.Check(new Version(1,9,9),CancellationToken.None);
+            Check("signed four-part release is a version upgrade",fourthPartUpdate is {Version:fourthPart,IsRevision:false});
+            Check("four-part installer downloads under its exact tag",fourthPartUpdate!=null&&
+                File.ReadAllBytes(await updates.Download(fourthPartUpdate,cache,CancellationToken.None)).SequenceEqual(payload));
+            Check("matching four-part build is quiet",await current.Check(new Version(1,9,9,1),CancellationToken.None)==null);
+            tag="v1.9.9.2";
+            Check("four-part version mismatching the signed manifest is rejected",await Rejected(()=>updates.Check(old,CancellationToken.None)));
         }
         catch(Exception e){tests.Add(new Result("exception",false,e.ToString()));}
         File.WriteAllText(Path.Combine(output,"update-checks.json"),JsonSerializer.Serialize(tests,new JsonSerializerOptions{WriteIndented=true}));

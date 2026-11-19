@@ -217,19 +217,32 @@ internal static class Tests
             // Wake bindings are opt-in. Old unsupported key values should load unbound.
             var defaultCfg=new Store(Path.Combine(root,"cfg-defaults")).Data;
             Check("DoubleClickToOpen defaults to false",!defaultCfg.DoubleClickToOpen);
-            Check("SuppressWakeKey defaults to zero",defaultCfg.SuppressWakeKey==0);
+            Check("Wake shortcut defaults to unbound",defaultCfg.SuppressWakeKey==0&&defaultCfg.WakeShortcutKeys==null);
             var cfgDir=Path.Combine(root,"cfg-198");
             var cfgStore=new Store(cfgDir);
             cfgStore.Data.DoubleClickToOpen=true;
             cfgStore.Data.SuppressWakeKey=0x91;
+            cfgStore.Data.WakeDisabled=true;
             cfgStore.SaveSettings();
             var cfgReload=new Store(cfgDir);
-            Check("valid custom wake binding persists",cfgReload.Data.DoubleClickToOpen&&cfgReload.Data.SuppressWakeKey==0x91);
+            Check("valid legacy single-key binding and mode persist",cfgReload.Data.DoubleClickToOpen&&cfgReload.Data.SuppressWakeKey==0x91&&cfgReload.Data.WakeDisabled);
             cfgReload.Data.SuppressWakeKey=0x13;cfgReload.Data.WakeDisabled=true;cfgReload.SaveSettings();
             var unsupportedWake=new Store(cfgDir).Data;
             Check("unsupported legacy wake key recovers to unbound",unsupportedWake.SuppressWakeKey==0&&!unsupportedWake.WakeDisabled&&
                 !Native.IsWakeBindingKey(0x03)&&!Native.IsWakeBindingKey(0xE7)&&!Native.IsWakeBindingKey(0x11));
             Check("SuppressWakeKey labels valid",Native.KeyName(0)=="待绑定"&&Native.KeyName(0x11)=="Ctrl");
+            cfgReload.Data.WakeShortcutKeys=new[]{0x77,0xA2,0xA5,0xA1};cfgReload.SaveSettings();
+            var shortcutConfig=new Store(cfgDir).Data;
+            var shortcut=WakeShortcut.Create(shortcutConfig.WakeShortcutKeys??Array.Empty<int>());
+            Check("four-key chord and mode persist in display order",shortcut?.Display=="Ctrl + Alt + Shift + F8"&&
+                shortcutConfig.SuppressWakeKey==0&&shortcutConfig.WakeDisabled);
+            var pressed=new HashSet<int>{0x77,0x11,0x12};
+            Check("final modifier completes chord in any order",shortcut?.MatchesPress(0xA1,pressed.Contains)==true);
+            pressed.Add(0x10);
+            Check("chord rejects a repeated member",shortcut?.MatchesPress(0xA1,pressed.Contains)==false);
+            pressed.Remove(0x11);pressed.Add(0x41);
+            Check("extra held key cannot complete an exact shortcut",shortcut?.MatchesPress(0xA2,pressed.Contains)==false&&
+                WakeShortcut.Create(new[]{0x11,0x12,0x10,0x77,0x41})==null);
             _ = Native.HasMaximizedWindow(System.Windows.Forms.Screen.PrimaryScreen!);
             Check("ShellDrop recognizes executable targets",ShellDrop.IsExecutableTarget(Environment.ProcessPath!));
             var dummyBat=Path.Combine(root,"tool.bat");File.WriteAllText(dummyBat,"@echo off");
@@ -282,11 +295,11 @@ internal static class Tests
         catch(Exception e) { results.Add(new { error=e.ToString() });Write("self-test.json");return 1; }
         finally { Directory.Delete(root,true); }
     }
-    public static void SettingsShot(Controller c)
+    public static async Task SettingsShot(Controller c)
     {
         try
         {
-            c.ShowSettings(w =>
+            await c.ShowSettings(w =>
             {
                 try
                 {
@@ -599,7 +612,7 @@ internal static class Tests
             var gridFixtures=Enumerable.Range(0,40).Select(n=>new Entry { Path=src,Name="布局验收 "+n }).ToArray();c.Store.Data.Entries.AddRange(gridFixtures);c.Store.Data.Mode="自定义";c.Store.Data.DockCapacity=0;c.Store.Data.DrawerRows=0;c.Store.Data.DrawerColumns=0;c.Changed();
             var order=c.Store.Data.Entries.Select(e=>e.Id).ToArray();
             Exception? settingsFailure=null;
-            c.ShowSettings(w=>
+            await c.ShowSettings(w=>
             {
                 try
                 {

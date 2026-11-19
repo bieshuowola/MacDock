@@ -21,7 +21,7 @@ internal sealed class ReleaseUpdates
     const int MaxMetadata=64*1024;
     const long MaxPackage=250L*1024*1024;
     static readonly Regex RepoName=new(@"\A[A-Za-z0-9][A-Za-z0-9-]*/[A-Za-z0-9_.-]+\z");
-    static readonly Regex ReleaseTag=new(@"\Av(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\z");
+    static readonly Regex ReleaseTag=new(@"\Av(0|[1-9][0-9]*)(\.(0|[1-9][0-9]*)){2,3}\z");
     readonly HttpClient client;
     readonly string repository;
     readonly byte[] publicKey;
@@ -143,7 +143,7 @@ internal sealed class ReleaseUpdates
             !key.VerifyData(bytes,signature,HashAlgorithmName.SHA256,DSASignatureFormat.IeeeP1363FixedFieldConcatenation))
             throw new InvalidDataException("更新签名验证失败。");
         var manifest=JsonSerializer.Deserialize<Manifest>(bytes);
-        if(manifest==null||manifest.Version!=version.ToString(3)||manifest.FileName!=$"MacDock-{version.ToString(3)}-win-x64-Setup.exe"||
+        if(manifest==null||manifest.Version!=version.ToString()||manifest.FileName!=$"MacDock-{version}-win-x64-Setup.exe"||
             manifest.Size is <=0 or >MaxPackage||manifest.Sha256?.Length!=64||!manifest.Sha256.All(Uri.IsHexDigit)||manifest.Notes==null||
             manifest.BuildSequence<=0||!Guid.TryParseExact(manifest.BuildFingerprint,"N",out var fingerprint)||fingerprint==Guid.Empty||
             manifest.PayloadSha256?.Length!=64||!manifest.PayloadSha256.All(Uri.IsHexDigit))

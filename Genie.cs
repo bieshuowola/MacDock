@@ -146,8 +146,14 @@ internal sealed class DrawerMotion
     {
         if (!rendering || e is not RenderingEventArgs frame || frame.RenderingTime == lastRenderingTime) return;
         lastRenderingTime = frame.RenderingTime;
-        // Start the cold-open clock on the first render callback, with a single subscription.
-        if(startOnRender){clock.Restart();startOnRender=false;}
+        if(startOnRender)
+        {
+            // Advance the first presented pose by at most one 120 Hz frame. A slow
+            // first callback still cannot spend the whole wait in a single spring step.
+            last=-Math.Min(clock.Elapsed.TotalSeconds,1.0/120);
+            clock.Restart();
+            startOnRender=false;
+        }
         Tick();
     }
     internal void Pause(){if(!rendering)return;Stop();paused=true;}

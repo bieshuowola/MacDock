@@ -4,7 +4,7 @@ namespace MacDock;
 // no screen-sized receiver window. Keep ownership of a dismissal's up even after hiding.
 internal sealed class ModalInputGate
 {
-    internal sealed record Regions(Native.Rect Drawer,Native.Rect Dock,bool Suspended=false,nint DrawerWindow=0,nint DockWindow=0,bool TextInput=false,bool Opening=false,GeniePose? Shape=null,double Scale=1,bool RedirectedForeground=false);
+    internal sealed record Regions(Native.Rect Drawer,Native.Rect Dock,bool Suspended=false,nint DrawerWindow=0,nint DockWindow=0,bool TextInput=false,bool Opening=false,GeniePose? Shape=null,double Scale=1,bool RedirectedForeground=false,nint SettingsWindow=0);
     internal volatile Regions? Current;
     readonly Action dismiss;
     readonly Action deactivate;
@@ -29,6 +29,8 @@ internal sealed class ModalInputGate
         twiceButton=0;
         var area=Current;
         if(area==null||area.Suspended)return false;
+        var hit=area.DrawerWindow==0&&area.DockWindow==0?0:Native.WindowFromPoint(point);
+        if(InWindow(hit,area.SettingsWindow))return false;
         if(area.DrawerWindow!=0&&!area.Opening)
         {
             var foreground=Native.GetForegroundWindow();
@@ -39,7 +41,6 @@ internal sealed class ModalInputGate
                 if(process!=Environment.ProcessId){Current=null;deactivate();return false;}
             }
         }
-        var hit=area.DrawerWindow==0&&area.DockWindow==0?0:Native.WindowFromPoint(point);
         if(area.TextInput&&hit!=0){var cls=Native.Class(hit);if(cls.StartsWith("Microsoft.IME.",StringComparison.Ordinal)||cls is "MSCTFIME UI" or "IME")return false;}
         bool inDrawer=area.Drawer.Contains(point)&&(area.Shape==null||area.Shape.Contains((point.X-area.Drawer.Left)/area.Scale,(point.Y-area.Drawer.Top)/area.Scale));
         if(inDrawer&&(area.DrawerWindow==0||hit==area.DrawerWindow)||area.Dock.Contains(point)&&(area.DockWindow==0||hit==area.DockWindow||area.RedirectedForeground&&hit==area.DrawerWindow&&!inDrawer))return false;
@@ -48,4 +49,7 @@ internal sealed class ModalInputGate
         if(area.Opening&&inDrawer){held|=bit;return true;}
         held|=bit;twiceButton=bit;twicePoint=point;twiceUntil=now+doubleTime;Current=null;dismiss();return true;
     }
+
+    internal static bool InWindow(nint hwnd,nint window) =>
+        hwnd!=0&&window!=0&&(hwnd==window||Native.GetAncestor(hwnd,3)==window);
 }

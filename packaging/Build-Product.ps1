@@ -1,7 +1,7 @@
 [CmdletBinding(DefaultParameterSetName='Unsigned')]
 param(
     [string]$Compiler,
-    [ValidatePattern('^\d+\.\d+\.\d+$')][string]$Version,
+    [ValidatePattern('^\d+(\.\d+){2,3}$')][string]$Version,
     [string]$ReleaseRepository,
     [string]$UpdatePublicKey,
     [string]$Signer,

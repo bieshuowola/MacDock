@@ -201,6 +201,9 @@ internal sealed class Controller : IDisposable
     public Layout Layout => new(WorkArea.Width/Scale,WorkArea.Height/Scale,Store.Data.DockCapacity,Store.Data.DrawerRows,Store.Data.DrawerColumns,DesktopView.IconSizeDip);
     internal bool AutoHideDock { get; set; }
     internal int SuppressWakeKey => Store.Data.SuppressWakeKey;
+    WakeShortcut? wakeShortcut;
+    internal string WakeShortcutDisplay => wakeShortcut?.Display ?? "待绑定";
+    internal bool HasWakeShortcut => wakeShortcut!=null;
     internal bool WakeKeyListening => hook?.WakeKeyListening==true;
     volatile bool wakeDisabled;
     internal bool WakeSuppressedByKey => wakeDisabled;
@@ -483,7 +486,8 @@ internal sealed class Controller : IDisposable
             ReconcileIcons();
         };
         iconReconcileTimer.Start();
-        wakeDisabled=SuppressWakeKey>0&&Store.Data.WakeDisabled;
+        wakeShortcut=WakeShortcut.Create(Store.Data.WakeShortcutKeys??new[]{SuppressWakeKey});
+        wakeDisabled=wakeShortcut!=null&&Store.Data.WakeDisabled;
         externalDragEscape.Tick+=(_,_)=>
         {
             if(!ExternalFileDragActive){externalDragEscape.Stop();return;}
@@ -494,7 +498,7 @@ internal sealed class Controller : IDisposable
         };
         displayRetry.Tick+=(_,_)=>{displayRetry.Stop();RefreshDisplay();};
         modal=new ModalInputGate(()=>System.Windows.Application.Current.Dispatcher.BeginInvoke(()=>{if(!AutoHideBlocked&&!Busy&&!InternalDragging)CloseDrawer(collapseDock:true);}),(int)Native.GetDoubleClickTime(),Native.DoubleClickWidth,Native.DoubleClickHeight,()=>System.Windows.Application.Current.Dispatcher.BeginInvoke(()=>{if(AutoHideBlocked||Busy||InternalDragging)return;drawerLostForeground=true;CloseDrawer(collapseDock:true);UpdateModalRegions();}));
-        hook=new PointerHook(OnPointerEvent,FilterPointer,SuppressWakeKey,OnWakeKeyPressed);
+        hook=new PointerHook(OnPointerEvent,FilterPointer,wakeShortcut,OnWakeKeyPressed);
         eventProc=(_,evt,h,obj,child,thread,time)=>
         {
             if(disposed)return;
@@ -514,6 +518,11 @@ internal sealed class Controller : IDisposable
         Position();CheckFullscreen();
         StartupStage("input-ready");
         StartWatchers();RegisterShellChanges();safetySync.Start();WarmIcons();
+        if(!skipDesktop)
+            System.Windows.Application.Current.Dispatcher.BeginInvoke(DispatcherPriority.ApplicationIdle,(Action)(()=>
+            {
+                if(!disposed&&!displayUnavailable&&Drawer==null)EnsureDrawer();
+            }));
         if(awaitingInitialDesktop)ScheduleSync();
         if(profile==null)_=Task.Run(EnsureStartupRegistration);
         DiagnosticsLog.Event("startup",new{milliseconds=Stopwatch.GetElapsedTime(startup).TotalMilliseconds,entries=Store.Data.Entries.Count,recovered=Store.Warning!=null});
@@ -650,20 +659,31 @@ internal sealed class Controller : IDisposable
 
     internal bool SetSuppressWakeKey(int vk)
     {
-        if(vk!=0&&!Native.IsWakeBindingKey(vk))return false;
+        var shortcut=vk==0?null:WakeShortcut.Create(new[]{vk});
+        return (vk==0||shortcut!=null)&&SetWakeShortcut(shortcut);
+    }
+
+    internal bool SetWakeShortcut(WakeShortcut? shortcut)
+    {
+        if(shortcut is {UsesDrawerHotkey:true})return false;
         var data=Store.Data;
-        if(!SaveSetting(()=>(data.SuppressWakeKey,data.WakeDisabled),
-            value=>(data.SuppressWakeKey,data.WakeDisabled)=value,(vk,vk!=0&&data.WakeDisabled)))return false;
-        hook?.SetWakeKey(vk);
+        var keys=shortcut?.ToArray();
+        if(!SaveSetting(()=>(data.SuppressWakeKey,data.WakeShortcutKeys,data.WakeDisabled),
+            value=>(data.SuppressWakeKey,data.WakeShortcutKeys,data.WakeDisabled)=value,
+            (keys is [var single]?single:0,keys is {Length:>1}?keys:null,shortcut!=null&&data.WakeDisabled)))return false;
+        wakeShortcut=shortcut;
+        hook?.SetWakeShortcut(shortcut);
         ApplyWakeMode();
         return true;
     }
 
-    void OnWakeKeyPressed(int key)
+    void OnWakeKeyPressed(WakeShortcut shortcut,nint foreground)
     {
         var dispatcher=System.Windows.Application.Current?.Dispatcher;
         dispatcher?.BeginInvoke(DispatcherPriority.Input,()=>{
-            if(disposed||key!=SuppressWakeKey||Busy||Drawer?.TextInputActive==true||Native.ForegroundTextEditing())return;
+            if(disposed||!ReferenceEquals(shortcut,wakeShortcut)||Busy||IsSettingsWindow(foreground)||
+                foreground!=Native.GetForegroundWindow())return;
+            if(shortcut.IsSingle&&(Drawer?.TextInputActive==true||Native.ForegroundTextEditing()))return;
             if(SaveSetting(()=>Store.Data.WakeDisabled,value=>Store.Data.WakeDisabled=value,!wakeDisabled))
                 ApplyWakeMode();
         });
@@ -864,7 +884,7 @@ internal sealed class Controller : IDisposable
         foreach(var key in keys)RequestIcon(key.Path,key.Px);
     }
 
-    void ReinstallPointerHook() { try { hook?.Dispose();hook=new PointerHook(OnPointerEvent,FilterPointer,SuppressWakeKey,OnWakeKeyPressed); } catch(Exception e) { Program.Log(e); } }
+    void ReinstallPointerHook() { try { hook?.Dispose();hook=new PointerHook(OnPointerEvent,FilterPointer,wakeShortcut,OnWakeKeyPressed); } catch(Exception e) { Program.Log(e); } }
     internal void TestReinstallHook()=>ReinstallPointerHook();
 
     // ---------------------------------------------------------------- placement
@@ -965,7 +985,7 @@ internal sealed class Controller : IDisposable
     {
         if(modal==null)return;
         modal.Current=!drawerLostForeground&&Drawer is {IsVisible:true}&&Native.GetWindowRect(Drawer.Handle,out var rect)
-            ?new ModalInputGate.Regions(Drawer.BodyBounds,dockRect,MenuOpen||Busy||InternalDragging||AutoHideBlocked,Drawer.Handle,Dock.Handle,Drawer.TextInputActive,drawerToken!=0&&!drawerClosing,Drawer.CurrentPose,Scale,!Drawer.AllowsTransparency):null;
+            ?new ModalInputGate.Regions(Drawer.BodyBounds,dockRect,MenuOpen||Busy||InternalDragging||AutoHideBlocked,Drawer.Handle,Dock.Handle,Drawer.TextInputActive,drawerToken!=0&&!drawerClosing,Drawer.CurrentPose,Scale,!Drawer.AllowsTransparency,settingsHandle):null;
         if(Drawer?.IsVisible!=true)modal.FinishDismissal();
     }
     internal void DrawerFocusChanged()
@@ -973,7 +993,7 @@ internal sealed class Controller : IDisposable
         if(Drawer is not {IsVisible:true}||MenuOpen||Busy||InternalDragging||AutoHideBlocked)return;
         if((Native.GetAsyncKeyState(1)&0x8000)!=0)return; // external OLE source can own focus while the file is being dragged
         var foreground=Native.GetForegroundWindow();
-        if(foreground==0||foreground==Drawer.Handle||foreground==Dock.Handle||Native.GetAncestor(foreground,3)==Drawer.Handle)return;
+        if(foreground==0||foreground==Drawer.Handle||foreground==Dock.Handle||Native.GetAncestor(foreground,3)==Drawer.Handle||IsSettingsWindow(foreground))return;
         drawerLostForeground=true;
         CloseDrawer(collapseDock:true);
         UpdateModalRegions();
@@ -1280,6 +1300,15 @@ internal sealed class Controller : IDisposable
     // ---------------------------------------------------------------- drawer
     bool drawerHideDeferred;
 
+    void EnsureDrawer()
+    {
+        if(Drawer!=null)return;
+        Drawer=new DrawerWindow(this);
+        MeasureDrawerStage("drawer-created");
+        Drawer.Render();
+        MeasureDrawerStage("drawer-content-ready");
+    }
+
     public void ToggleDrawer()
     {
         MeasureDrawerStage("toggle");
@@ -1292,14 +1321,10 @@ internal sealed class Controller : IDisposable
         if(drawerClosing){drawerHideDeferred=false;drawerClosing=false;drawerToken=++drawerEpoch;}
         Expand();
         MeasureDrawerStage("dock-ready");
-        if(Drawer==null)
-        {
-            Drawer=new DrawerWindow(this);
-            Drawer.Render();
-        }
+        EnsureDrawer();
         drawerClosing=false;
         retainedDockArea=null;
-        if(!Drawer.IsVisible)Drawer.PrepareForOpen();
+        if(!Drawer!.IsVisible)Drawer.PrepareForOpen();
         MeasureDrawerStage("drawer-prepared");
         ShowDrawerAnimated();
     }
@@ -1311,7 +1336,9 @@ internal sealed class Controller : IDisposable
         drawerClosing=false;int token=drawerToken=++drawerEpoch;
         if(fresh){drawerMotion.Snap(0);var gateway=Dock.GatewayCenter;drawerAnchorX=(gateway.X-target.Left)/Scale-d.MaterialInset;drawerAnchorY=(gateway.Y-target.Top)/Scale-d.MaterialInset;new WindowInteropHelper(d).EnsureHandle();d.Place(target.Left,target.Top);d.SetSurfaceOpacity(0);d.SetGenie(0,drawerAnchorX,drawerAnchorY);MeasureDrawerStage("pose-ready");d.Show();MeasureDrawerStage("window-shown");d.Place(target.Left,target.Top);}
         else if(!d.IsDeforming){var gateway=Dock.GatewayCenter;drawerAnchorX=(gateway.X-target.Left)/Scale-d.MaterialInset;drawerAnchorY=(gateway.Y-target.Top)/Scale-d.MaterialInset;d.SetGenie(drawerMotion.Value,drawerAnchorX,drawerAnchorY);}
-        d.Activate();if(fresh)d.FocusGrid();d.UpdateLayout();
+        if(!d.IsActive)d.Activate();
+        if(fresh)d.FocusGrid();
+        d.UpdateLayout();
         MeasureDrawerStage("layout-ready");
         // Only our two surfaces are reordered, once, before the transition. No changes
         // during native menu tracking; the extended curved neck cannot cover the button.
@@ -1429,8 +1456,11 @@ internal sealed class Controller : IDisposable
     {
         if(InternalDropProtected||DrawerInteractionActive)return;
         if(!force && AutoHideBlocked)return;
-        DrawerPinned=false;
-        Drawer?.UpdatePinVisual();
+        if(DrawerPinned)
+        {
+            DrawerPinned=false;
+            Drawer?.UpdatePinVisual();
+        }
         var d=Drawer;
         if(collapseDock){retainedDockArea=null;if(!DesktopResident)HideDockAnimated();}
         if(d==null||!d.IsVisible||drawerClosing)return;
@@ -2329,12 +2359,35 @@ internal sealed class Controller : IDisposable
         }
         SetRunStartup(exe);
     }
-    public void Settings()=>ShowSettings(null);
-    internal void ShowSettings(Action<Window>? ready)
+    Window? settingsWindow;
+    nint settingsHandle;
+    Task? settingsClosed;
+    bool IsSettingsWindow(nint hwnd)=>ModalInputGate.InWindow(hwnd,settingsHandle);
+
+    public void Settings()=>_=ShowSettings(null);
+    internal Task ShowSettings(Action<Window>? ready)
     {
-        Busy=true;
-        try { Dialogs.Settings(this,ready); }
-        finally { Busy=false; }
+        if(settingsWindow is { } existing)
+        {
+            var closed=settingsClosed!;
+            existing.Activate();
+            ready?.Invoke(existing);
+            return closed;
+        }
+        var window=Dialogs.Settings(this);
+        var completion=new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        window.Closed+=(_,_)=>{
+            settingsWindow=null;settingsHandle=0;settingsClosed=null;
+            UpdateModalRegions();
+            completion.TrySetResult();
+        };
+        window.Loaded+=(_,_)=>ready?.Invoke(window);
+        settingsHandle=new WindowInteropHelper(window).EnsureHandle();
+        settingsWindow=window;
+        settingsClosed=completion.Task;
+        UpdateModalRegions();
+        window.Show();
+        return completion.Task;
     }
     public void Notify(string message,bool warning=true) { tray.BalloonTipTitle="MacDock";tray.BalloonTipText=message;tray.BalloonTipIcon=warning?Forms.ToolTipIcon.Warning:Forms.ToolTipIcon.Info;tray.ShowBalloonTip(5000); }
 

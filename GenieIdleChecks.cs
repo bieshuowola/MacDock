@@ -97,11 +97,14 @@ internal static class GenieIdleChecks
         async Task WakeDock()
         {
             if(keyboardInput)return;
-            if(controller.Dock.IsVisible)return;
-            var wake=controller.WakeBounds;
-            await MovePointer((wake.Left+wake.Right)/2,(wake.Top+wake.Bottom)/2);
-            await Until(()=>controller.Dock.IsVisible);
-            await Task.Delay(170);
+            if(!controller.Dock.IsVisible)
+            {
+                var wake=controller.WakeBounds;
+                await MovePointer((wake.Left+wake.Right)/2,(wake.Top+wake.Bottom)/2);
+                await Until(()=>controller.Dock.IsVisible);
+            }
+            controller.SettleDockMotion();
+            await Until(()=>Native.WindowFromPoint(controller.Dock.GatewayCenter)==controller.Dock.Handle);
         }
         async Task ClickDrawer()
         {
@@ -166,7 +169,7 @@ internal static class GenieIdleChecks
             });
             Save();
             await Task.Delay(100);
-            await ClickDrawer();
+            controller.CloseDrawer(keepDock:true,force:true);
             await Until(()=>controller.Drawer?.IsVisible!=true);
             if(externalForeground)Native.SetForegroundWindow(previousForeground);
         }

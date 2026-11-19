@@ -17,8 +17,9 @@ internal sealed class PointerHook : IDisposable
     uint threadId;
     nint hook;
     nint keyHook;
-    readonly Action<int>? wakePressed;
-    volatile int wakeKey;
+    readonly Action<WakeShortcut,nint>? wakePressed;
+    static readonly Func<int,bool> KeyHeld=Native.KeyHeld;
+    volatile WakeShortcut? wakeShortcut;
     const uint WakeBindingChanged=0x8001;
     internal static int Installations;
     internal static bool AuditInput;
@@ -27,19 +28,18 @@ internal sealed class PointerHook : IDisposable
 
     public bool Available => hook != 0;
     internal bool WakeKeyListening => Volatile.Read(ref keyHook)!=0;
-    internal void SetWakeKey(int key)
+    internal void SetWakeShortcut(WakeShortcut? shortcut)
     {
-        if(wakeKey==key)return;
-        wakeKey=key;
+        wakeShortcut=shortcut;
         uint owner=threadId;
         if(owner!=0)Native.PostThreadMessage(owner,WakeBindingChanged,0,0);
     }
 
-    public PointerHook(Action<Native.Point,bool> handler,Func<Native.Point,uint,uint,bool>? filter=null,int wakeKey=0,Action<int>? wakePressed=null)
+    public PointerHook(Action<Native.Point,bool> handler,Func<Native.Point,uint,uint,bool>? filter=null,WakeShortcut? wakeShortcut=null,Action<WakeShortcut,nint>? wakePressed=null)
     {
         this.handler = handler;
         this.filter=filter;
-        this.wakeKey=wakeKey;
+        this.wakeShortcut=wakeShortcut;
         this.wakePressed=wakePressed;
         proc = Callback;
         keyProc = ObserveWakeKey;
@@ -72,7 +72,7 @@ internal sealed class PointerHook : IDisposable
 
     void UpdateWakeListener()
     {
-        if(!disposed&&wakePressed!=null&&wakeKey!=0)
+        if(!disposed&&wakePressed!=null&&wakeShortcut!=null)
         {
             if(keyHook==0)
                 Volatile.Write(ref keyHook,Native.SetWindowsHookEx(13,keyProc,Native.GetModuleHandle(null),0));
@@ -90,17 +90,11 @@ internal sealed class PointerHook : IDisposable
     {
         if(code==0&&!disposed&&message is 0x0100 or 0x0104)
         {
-            int binding=wakeKey;
             try
             {
-                // vkCode is the first DWORD of KBDLLHOOKSTRUCT. Windows updates its async
-                // key state after this callback, so an already-down key is an auto-repeat.
-                // Rely on Windows for that previous state instead of owning a key-up latch.
-                if(binding!=0&&Marshal.ReadInt32(data)==binding&&(Marshal.ReadInt32(data,8)&0x20)==0&&
-                    !Native.KeyHeld(binding)&&
-                    !Native.KeyHeld(0x10)&&!Native.KeyHeld(0x11)&&!Native.KeyHeld(0x12)&&
-                    !Native.KeyHeld(0x5B)&&!Native.KeyHeld(0x5C))
-                    wakePressed?.Invoke(binding);
+                var shortcut=wakeShortcut;
+                if(shortcut!=null&&shortcut.MatchesPress(Marshal.ReadInt32(data),KeyHeld))
+                    wakePressed?.Invoke(shortcut,Native.GetForegroundWindow());
             }
             catch { /* A Dock callback failure must still forward the original input. */ }
         }
