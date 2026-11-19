@@ -125,7 +125,7 @@ internal sealed class HostGlass:IDisposable
             return;
         }
         if(inset>0){
-            var topRow=pose.Row(0,true);var bottomRow=pose.Row(1,true);
+            var topRow=pose.GetRow(0);var bottomRow=pose.GetRow(GeniePose.Rows);
             bool hasArea=pose.Progress>0.001&&(bottomRow.Y-topRow.Y)*scale>=2.0;
             if(changing||dirty||curveGeometry==null||curveClip==null)
             {
@@ -150,12 +150,12 @@ internal sealed class HostGlass:IDisposable
         if(!DiagnosticSkipRegion)
 #endif
         {
-            var edge=new Native.Point[(GeniePose.Rows+1)*2];for(int i=0;i<=GeniePose.Rows;i++){var row=pose.Row(GeniePose.RowT(i),true);edge[i]=new Native.Point((int)Math.Floor(row.Left*scale)-1,(int)Math.Round(row.Y*scale));edge[edge.Length-1-i]=new Native.Point((int)Math.Ceiling(row.Right*scale)+1,(int)Math.Round(row.Y*scale));}var region=CreatePolygonRgn(edge,edge.Length,1);if(region!=0&&SetWindowRgn(window,region,false)==0)DeleteObject(region);
+            var edge=new Native.Point[(GeniePose.Rows+1)*2];for(int i=0;i<=GeniePose.Rows;i++){var row=pose.GetRow(i);edge[i]=new Native.Point((int)Math.Floor(row.RoundedLeft*scale)-1,(int)Math.Round(row.Y*scale));edge[edge.Length-1-i]=new Native.Point((int)Math.Ceiling(row.RoundedRight*scale)+1,(int)Math.Round(row.Y*scale));}var region=CreatePolygonRgn(edge,edge.Length,1);if(region!=0&&SetWindowRgn(window,region,false)==0)DeleteObject(region);
         }
         while(ribbon.Count<ribbonRows.Length-1){var v=compositor.CreateSpriteVisual();v.Brush=backdrop.Brush;root.Children.InsertAtTop(v);ribbon.Add(v);}
         for(int i=0;i<ribbon.Count;i++){
-            var a=pose.Row(GeniePose.RowT(ribbonRows[i]),true);var b=pose.Row(GeniePose.RowT(ribbonRows[i+1]),true);
-            double left=a.Left*scale,right=a.Right*scale,nextLeft=b.Left*scale,nextRight=b.Right*scale,y=a.Y*scale,nextY=b.Y*scale;
+            var a=pose.GetRow(ribbonRows[i]);var b=pose.GetRow(ribbonRows[i+1]);
+            double left=a.RoundedLeft*scale,right=a.RoundedRight*scale,nextLeft=b.RoundedLeft*scale,nextRight=b.RoundedRight*scale,y=a.Y*scale,nextY=b.Y*scale;
             float w=(float)Math.Max(.1,right-left),h=(float)Math.Max(.05,nextY-y),k=(float)((right-left)/Math.Max(.1,nextRight-nextLeft));
             var strip=ribbon[i];if(changing)strip.IsVisible=true;strip.Size=new Vector2(w,h+(i+1<ribbon.Count?.35f:0));
             // Projective quad, not a stretched one-pixel image: every strip still samples

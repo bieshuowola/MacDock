@@ -159,7 +159,7 @@
       <Setter.Value>
         <ControlTemplate TargetType="ComboBox">
           <Grid>
-            <Border x:Name="Bd" CornerRadius="8" Background="{DynamicResource FillSoft}" BorderBrush="#26FFFFFF" BorderThickness="1" SnapsToDevicePixels="True"/>
+            <Border x:Name="Bd" CornerRadius="8" Background="{DynamicResource FillSoft}" BorderBrush="{DynamicResource FillSoft}" BorderThickness="1" SnapsToDevicePixels="True"/>
             <ContentPresenter Margin="11,0,30,0" VerticalAlignment="Center" IsHitTestVisible="False"
                               Content="{TemplateBinding SelectionBoxItem}" ContentTemplate="{TemplateBinding SelectionBoxItemTemplate}"/>
             <Path Data="M0,0 L4.4,4.4 L8.8,0" Stroke="{DynamicResource Muted}" StrokeThickness="1.4"
@@ -223,9 +223,12 @@
               <Border x:Name="Track" CornerRadius="11" Background="{DynamicResource FillActive}" BorderBrush="{DynamicResource Hairline}" BorderThickness="1"/>
               <Ellipse x:Name="Thumb" Width="15" Height="15" Fill="#F4F7FC" HorizontalAlignment="Left" Margin="4,0,0,0"/>
             </Grid>
-            <ContentPresenter Margin="11,0,0,0" VerticalAlignment="Center"/>
+            <ContentPresenter x:Name="ContentHost" Margin="11,0,0,0" VerticalAlignment="Center"/>
           </StackPanel>
           <ControlTemplate.Triggers>
+            <Trigger Property="HasContent" Value="False">
+              <Setter TargetName="ContentHost" Property="Visibility" Value="Collapsed"/>
+            </Trigger>
             <Trigger Property="IsChecked" Value="True">
               <Setter TargetName="Track" Property="Background" Value="#4C8DFF"/>
               <Setter TargetName="Track" Property="BorderBrush" Value="#6BA4FF"/>

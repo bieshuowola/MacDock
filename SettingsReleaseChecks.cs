@@ -142,9 +142,50 @@ internal static class SettingsReleaseChecks
                         Check("Ctrl+Alt+Space binds without opening drawer or toggling wake",
                             new Store(Path.GetDirectoryName(c.Store.FilePath)).Data.WakeShortcutKeys?.SequenceEqual(new[]{0x11,0x12,0x20})==true&&
                             (string?)bindKey.Content=="Ctrl + Alt + Space"&&!c.WakeRecording&&c.Drawer?.IsVisible!=true&&!c.WakeSuppressedByKey);
+                        void AssertSettingsLayout(string stateTag)
+                        {
+                            w.UpdateLayout();
+                            double RightEdge(FrameworkElement el)=>el.TranslatePoint(new Point(el.ActualWidth,0),w).X;
+                            double LeftEdge(FrameworkElement el)=>el.TranslatePoint(new Point(0,0),w).X;
+                            double TopEdge(FrameworkElement el)=>el.TranslatePoint(new Point(0,0),w).Y;
+                            double BottomEdge(FrameworkElement el)=>el.TranslatePoint(new Point(0,el.ActualHeight),w).Y;
+                            var startupToggle=Named<CheckBox>("开机自启动");
+                            var motionToggle=Named<CheckBox>("减少动画效果");
+                            var suppressLabel=nodes.OfType<TextBlock>().Single(t=>t.Text=="临时关闭 MacDock");
+                            var suppressDesc=nodes.OfType<TextBlock>().Single(t=>t.Text.StartsWith("设置一个快捷键，按下后临时关闭"));
+                            double refRight=RightEdge(openMode);
+                            Check($"[{stateTag}] right edges align (ref={refRight:F2} startup={RightEdge(startupToggle):F2} motion={RightEdge(motionToggle):F2} clear={RightEdge(clearKey):F2} app={RightEdge(appearance):F2} save={RightEdge(save):F2})",
+                                Math.Abs(RightEdge(startupToggle)-refRight)<=1.0&&
+                                Math.Abs(RightEdge(motionToggle)-refRight)<=1.0&&
+                                Math.Abs(RightEdge(clearKey)-refRight)<=1.0&&
+                                Math.Abs(RightEdge(appearance)-refRight)<=1.0&&
+                                Math.Abs(RightEdge(save)-refRight)<=1.0);
+                            Check($"[{stateTag}] control heights consistent at 30 DIP",
+                                Math.Abs(bindKey.ActualHeight-30)<=1.0&&
+                                Math.Abs(clearKey.ActualHeight-30)<=1.0&&
+                                Math.Abs(openMode.ActualHeight-30)<=1.0);
+                            double gap=LeftEdge(clearKey)-RightEdge(bindKey);
+                            double labelGap=LeftEdge(bindKey)-RightEdge(suppressLabel);
+                            double descGap=TopEdge(suppressDesc)-BottomEdge(bindKey);
+                            Check($"[{stateTag}] hotkey buttons gap and zero label/desc overlap (btnGap={gap:F2} labelGap={labelGap:F2} descGap={descGap:F2})",
+                                gap>=4.5&&gap<=7.5&&labelGap>=8.0&&descGap>=4.0);
+                        }
+                        AssertSettingsLayout("bound-light-458");
+                        using(var alignedBmp=new System.Drawing.Bitmap((int)Math.Ceiling(w.ActualWidth*c.Scale),(int)Math.Ceiling(w.ActualHeight*c.Scale)))
+                        {
+                            var pt=w.PointToScreen(new Point());
+                            using(var graphics=System.Drawing.Graphics.FromImage(alignedBmp))graphics.CopyFromScreen((int)pt.X,(int)pt.Y,0,0,alignedBmp.Size);
+                            alignedBmp.Save(Path.Combine(output,"settings-light-aligned.png"));
+                        }
+                        double origW=w.Width;
+                        w.Width=400;
+                        AssertSettingsLayout("bound-light-400");
+                        w.Width=origW;
+                        w.UpdateLayout();
                         Press(clearKey);
                         var cleared=new Store(Path.GetDirectoryName(c.Store.FilePath)).Data;
                         Check("suppress wake key clears and persists",cleared.SuppressWakeKey==0&&cleared.WakeShortcutKeys==null&&!clearKey.IsEnabled&&(string?)bindKey.Content=="未设置快捷键");
+                        AssertSettingsLayout("unbound-light-458");
                     }
                     using var bitmap=new System.Drawing.Bitmap((int)Math.Ceiling(w.ActualWidth*c.Scale),(int)Math.Ceiling(w.ActualHeight*c.Scale));
                     var point=w.PointToScreen(new Point());

@@ -31,6 +31,9 @@ internal sealed class ModalInputGate
         if(area==null||area.Suspended)return false;
         var hit=area.DrawerWindow==0&&area.DockWindow==0?0:Native.WindowFromPoint(point);
         if(InWindow(hit,area.SettingsWindow))return false;
+        if(area.TextInput&&hit!=0){var cls=Native.Class(hit);if(cls.StartsWith("Microsoft.IME.",StringComparison.Ordinal)||cls is "MSCTFIME UI" or "IME")return false;}
+        bool inDrawer=area.Drawer.Contains(point)&&(area.Shape==null||area.Shape.Contains((point.X-area.Drawer.Left)/area.Scale,(point.Y-area.Drawer.Top)/area.Scale));
+        if(inDrawer&&(area.DrawerWindow==0||hit==area.DrawerWindow)||area.Dock.Contains(point)&&(area.DockWindow==0||hit==area.DockWindow||area.RedirectedForeground&&hit==area.DrawerWindow&&!inDrawer))return false;
         if(area.DrawerWindow!=0&&!area.Opening)
         {
             var foreground=Native.GetForegroundWindow();
@@ -41,9 +44,6 @@ internal sealed class ModalInputGate
                 if(process!=Environment.ProcessId){Current=null;deactivate();return false;}
             }
         }
-        if(area.TextInput&&hit!=0){var cls=Native.Class(hit);if(cls.StartsWith("Microsoft.IME.",StringComparison.Ordinal)||cls is "MSCTFIME UI" or "IME")return false;}
-        bool inDrawer=area.Drawer.Contains(point)&&(area.Shape==null||area.Shape.Contains((point.X-area.Drawer.Left)/area.Scale,(point.Y-area.Drawer.Top)/area.Scale));
-        if(inDrawer&&(area.DrawerWindow==0||hit==area.DrawerWindow)||area.Dock.Contains(point)&&(area.DockWindow==0||hit==area.DockWindow||area.RedirectedForeground&&hit==area.DrawerWindow&&!inDrawer))return false;
         // A composition backdrop may become visible a frame before the layered WPF content
         // has its first input bitmap. Absorb that pair without dismissing or clicking behind.
         if(area.Opening&&inDrawer){held|=bit;return true;}

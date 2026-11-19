@@ -56,10 +56,24 @@ internal static unsafe class NativeContour
     }
     [UnmanagedCallersOnly(CallConvs=new[]{typeof(CallConvStdcall)})]
     static uint AddRef(nint self)=>(uint)Interlocked.Increment(ref State(self).References);
+    static Source? pooled;
+    static Source RentSource(nint geometry)
+    {
+        var state=Interlocked.Exchange(ref pooled,null);
+        if(state!=null){state.Geometry=geometry;state.References=1;return state;}
+        return new Source(geometry);
+    }
     static uint ReleaseCore(nint self)
     {
         var state=State(self);int count=Interlocked.Decrement(ref state.References);
-        if(count==0){Marshal.Release(state.Geometry);Marshal.FreeHGlobal(state.Marker);Marshal.FreeHGlobal(state.Interop);GCHandle.FromIntPtr(state.Handle).Free();}
+        if(count==0)
+        {
+            nint geom=state.Geometry;state.Geometry=0;if(geom!=0)Marshal.Release(geom);
+            if(Interlocked.CompareExchange(ref pooled,state,null)!=null)
+            {
+                Marshal.FreeHGlobal(state.Marker);Marshal.FreeHGlobal(state.Interop);GCHandle.FromIntPtr(state.Handle).Free();
+            }
+        }
         return (uint)count;
     }
     [UnmanagedCallersOnly(CallConvs=new[]{typeof(CallConvStdcall)})]
@@ -89,12 +103,14 @@ internal static unsafe class NativeContour
     {
         const float insetPx=0.75f;
         const float bottomInsetPx=0.0f;
-        float topY=(float)(pose.Row(0,true).Y*scale)+insetPx;
-        float botY=(float)(pose.Row(GeniePose.RowT(GeniePose.Rows),true).Y*scale)-bottomInsetPx;
+        var topRow=pose.GetRow(0);
+        var botRow=pose.GetRow(GeniePose.Rows);
+        float topY=(float)(topRow.Y*scale)+insetPx;
+        float botY=(float)(botRow.Y*scale)-bottomInsetPx;
         bool collapsed=botY<=topY+0.5f;
         for(int i=0;i<=GeniePose.Rows;i++){
-            var row=pose.Row(GeniePose.RowT(i),true);
-            float l=(float)(row.Left*scale)+insetPx,r=(float)(row.Right*scale)-insetPx;
+            var row=pose.GetRow(i);
+            float l=(float)(row.RoundedLeft*scale)+insetPx,r=(float)(row.RoundedRight*scale)-insetPx;
             if(r<l){float mid=(l+r)*0.5f;l=r=mid;}
             float y=collapsed?topY:Math.Clamp((float)(row.Y*scale)+(i==0?insetPx:i==GeniePose.Rows?-bottomInsetPx:0f),topY,botY);
             sharedPoints[i]=new(l,y);
@@ -105,7 +121,7 @@ internal static unsafe class NativeContour
         try{
             Marshal.ThrowExceptionForHR(Method<OpenPath>(geometry,17)(geometry,out sink));
             Method<Begin>(sink,5)(sink,sharedPoints[0],0);Method<Lines>(sink,6)(sink,sharedPoints,(uint)sharedPoints.Length);Method<End>(sink,8)(sink,1);Marshal.ThrowExceptionForHR(Method<Close>(sink,9)(sink));
-            source=new Source(geometry);var projected=WinRT.MarshalInterface<IGeometrySource2D>.FromAbi(source.Marker);
+            source=RentSource(geometry);var projected=WinRT.MarshalInterface<IGeometrySource2D>.FromAbi(source.Marker);
             return new CompositionPath(projected);
         }finally{if(sink!=0)Marshal.Release(sink);if(source!=null)ReleaseCore(source.Marker);else Marshal.Release(geometry);}
     }

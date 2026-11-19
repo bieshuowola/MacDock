@@ -77,26 +77,61 @@ internal sealed class DrawerWindow : GlassWindow
     readonly RectangleGeometry stageClipGeometry = new();
     RenderTargetBitmap? prebakedBitmap;
     bool prebakedDirty = true, prebakeQueued, windowClosed;
-    double prebakedWidth, prebakedHeight, prebakedScale;
-    bool deforming,meshAttached;double genieWidth,genieHeight,genieFrame;
+    double prebakedWidth, prebakedHeight, prebakedScale, prebakedScrollOffset = double.NaN;
+    int prebakedReadyIcons = -1, prebakedTotalIcons = -1;
+    internal readonly record struct DrawerIconDiagnostics(int Total, int Ready, int BlankPlaceholders, int UnarrangedImages, int LoadedSynchronously, long CacheHits, long TotalLoads, double PrepareMs);
+    internal DrawerIconDiagnostics LastIconDiagnostics { get; private set; }
+    internal double PrebakedScrollOffset => prebakedScrollOffset;
+    internal BitmapSource? PrebakedBitmap => prebakedBitmap;
+    internal BitmapSource? GenieBoundBitmap => genie?.BoundBitmap;
+    bool IsPrebakedValid(double w, double h, double scale) =>
+        !prebakedDirty &&
+        pendingAnchor == null &&
+        prebakedBitmap != null &&
+        prebakedTotalIcons == visibleOrder.Count &&
+        (prebakedReadyIcons == visibleOrder.Count || deforming) &&
+        Math.Abs(prebakedWidth - w) < 0.1 &&
+        Math.Abs(prebakedHeight - h) < 0.1 &&
+        Math.Abs(prebakedScale - scale) < 0.001 &&
+        Math.Abs(prebakedScrollOffset - scroll.VerticalOffset) < 0.05;
+    bool deforming, meshAttached; double genieWidth, genieHeight, genieFrame;
     GeniePose? prevDeformPose;
     Layout? appliedLayout;
     double appliedScale;
-    readonly Grid stage=new(){ClipToBounds=true};
-    protected override UIElement? ForegroundOpacityTarget=>stage;
-    readonly SoftContour contour=new();
-    readonly bool shareShadow=false;
-    readonly GatewayVisual gatewayRibbon=new();
-    internal override double MaterialInset=>SoftContour.Pad;
-    internal double PanelWidth=>Math.Max(0,Width-2*MaterialInset);
-    internal Native.Rect BodyBounds{get{Native.GetWindowRect(Handle,out var r);int p=(int)Math.Round(MaterialInset*owner.Scale);r.Left+=p;r.Top+=p;r.Right-=p;r.Bottom=r.Top+(int)Math.Round((CurrentPose?.FrameHeight??PanelHeight)*owner.Scale);return r;}}
-    public override bool Contains(Native.Point p){var r=BodyBounds;return IsVisible&&r.Contains(p)&&(CurrentPose==null||CurrentPose.Contains((p.X-r.Left)/owner.Scale,(p.Y-r.Top)/owner.Scale));}
+    readonly Grid stage = new() { ClipToBounds = true };
+    protected override UIElement? ForegroundOpacityTarget => stage;
+    readonly SoftContour contour = new();
+    readonly bool shareShadow = false;
+    readonly bool legacyGenie = GenieEngine.IsLegacy;
+    readonly GatewayVisual gatewayRibbon = new();
+    internal override double MaterialInset => SoftContour.Pad;
+    internal double PanelWidth => Math.Max(0, Width - 2 * MaterialInset);
+    bool windowRectCached;
+    Native.Rect cachedWindowRect;
+    internal void InvalidateWindowRectCache() => windowRectCached = false;
+    internal Native.Rect BodyBounds
+    {
+        get
+        {
+            if (!windowRectCached && Handle != 0 && Native.GetWindowRect(Handle, out var wr))
+            {
+                cachedWindowRect = wr;
+                windowRectCached = true;
+            }
+            var r = cachedWindowRect;
+            int p = (int)Math.Round(MaterialInset * owner.Scale);
+            r.Left += p; r.Top += p; r.Right -= p;
+            r.Bottom = r.Top + (int)Math.Round((CurrentPose?.FrameHeight ?? PanelHeight) * owner.Scale);
+            return r;
+        }
+    }
+    public override bool Contains(Native.Point p) { var r = BodyBounds; return IsVisible && r.Contains(p) && (CurrentPose == null || CurrentPose.Contains((p.X - r.Left) / owner.Scale, (p.Y - r.Top) / owner.Scale)); }
     // Viewport2DVisual3D owns a Visual, not a WPF logical child. Keep the live source
     // in this window's logical tree so Loaded/Unloaded, icon subscriptions, resources,
     // focus scopes and scrolling templates retain their normal lifetimes.
     protected override System.Collections.IEnumerator LogicalChildren
     {
-        get{var children=new List<object>();var basis=base.LogicalChildren;while(basis.MoveNext())children.Add(basis.Current);if(meshAttached&&Surface!=null)children.Add(Surface);return children.GetEnumerator();}
+        get { var children = new List<object>(); var basis = base.LogicalChildren; while (basis.MoveNext()) children.Add(basis.Current); if (legacyGenie && meshAttached && Surface != null) children.Add(Surface); return children.GetEnumerator(); }
     }
     internal GeniePose? CurrentPose {get;private set;}
     internal double PanelHeight=>Math.Round(DesiredHeight()*owner.Scale)/owner.Scale;
@@ -130,6 +165,42 @@ internal sealed class DrawerWindow : GlassWindow
         stage.ClipToBounds = clipToStage;
     }
 
+    bool EnsureGenieVisual(double frame)
+    {
+        if (genie != null && genieWidth == PanelWidth && genieHeight == PanelHeight && genieFrame == frame)
+            return false;
+        if (genie != null && !legacyGenie)
+        {
+            stage.Children.Remove(genie.View);
+            genie.Detach();
+        }
+        genieWidth = PanelWidth; genieHeight = PanelHeight; genieFrame = frame;
+        genie = new GenieVisual(PanelWidth, PanelHeight, frame, shareShadow);
+        if (!legacyGenie)
+        {
+            genie.View.Visibility = Visibility.Hidden;
+            genie.View.IsHitTestVisible = false;
+            stage.Children.Add(genie.View);
+            var size = new Size(PanelWidth, frame);
+            genie.View.Measure(size);
+            genie.View.Arrange(new Rect(size));
+        }
+        return true;
+    }
+
+    internal void WarmStartup()
+    {
+        if (windowClosed) return;
+        new WindowInteropHelper(this).EnsureHandle();
+        PrepareForOpen(loadMissingSynchronously: false);
+        if (!legacyGenie)
+        {
+            double frame = FrameHeight;
+            EnsureGenieVisual(frame);
+            if (prebakedBitmap != null) genie!.SetBitmap(prebakedBitmap, PanelWidth, PanelHeight);
+        }
+    }
+
     internal void SetGenie(double phase,double anchorX,double anchorY)
     {
         double frame=FrameHeight;
@@ -138,7 +209,9 @@ internal sealed class DrawerWindow : GlassWindow
         // resize can synchronously refresh the compositor with a full-sized round rect.
         // Give the panes the first part of the motion. The existing Genie silhouette
         // catches up smoothly once the glyph has extended across the Dock edge.
-        double sheetPhase = phase * GeniePose.Smooth(phase / .36);
+        double sheetPhase = legacyGenie
+            ? phase * GeniePose.Smooth(phase / .36)
+            : phase * (0.28 + 0.72 * GeniePose.Smooth(phase / .34));
         var pose=new GeniePose(PanelWidth,PanelHeight,frame,anchorX,anchorY,sheetPhase);
         // Coverage stays with the material's four corner patches, also in the
         // cached live texture. A second geometry clip would quantize it again.
@@ -147,27 +220,50 @@ internal sealed class DrawerWindow : GlassWindow
         var hostPose = !deforming ? pose : (prevDeformPose ?? pose);
         prevDeformPose = pose;
         deforming=true;CurrentPose=pose;SetMaterialGenie(hostPose);
-        stageClipGeometry.Rect=new Rect(-MaterialInset,0,PanelWidth+2*MaterialInset,Math.Max(0,pose.Row(1).Y-0.5));
+        stageClipGeometry.Rect=new Rect(-MaterialInset,0,PanelWidth+2*MaterialInset,Math.Max(0,pose.GetRow(GeniePose.Rows).Y-0.5));
         if(!ReferenceEquals(stage.Clip,stageClipGeometry))stage.Clip=stageClipGeometry;
         owner.DrawerLayerFrame?.Invoke("begin-after-resize",MaterialSnapshot);
-        if(!meshAttached&&Surface!=null)
+        if(legacyGenie)
         {
-            if(genie==null||genieWidth!=PanelWidth||genieHeight!=PanelHeight||genieFrame!=frame)
+            if(!meshAttached&&Surface!=null)
             {
-                genieWidth=PanelWidth;genieHeight=PanelHeight;genieFrame=frame;
-                genie=new GenieVisual(PanelWidth,frame,shareShadow);
+                if(genie==null||genieWidth!=PanelWidth||genieHeight!=PanelHeight||genieFrame!=frame)
+                {
+                    genieWidth=PanelWidth;genieHeight=PanelHeight;genieFrame=frame;
+                    genie=new GenieVisual(PanelWidth,PanelHeight,frame,shareShadow);
+                }
+                var targetSurface=BakeGenieSurface();
+                stage.Children.Clear();AddLogicalChild(Surface);meshAttached=true;
+                genie.Attach(targetSurface);genie.Set(pose,owner.Scale);stage.Children.Add(genie.View);
+                if(IsVisible)stage.UpdateLayout();
             }
-            var targetSurface=BakeGenieSurface();
-            stage.Children.Clear();AddLogicalChild(Surface);meshAttached=true;
-            genie.Attach(targetSurface);genie.Set(pose);stage.Children.Add(genie.View);
-            if(IsVisible)stage.UpdateLayout();
+            genie!.Set(pose,owner.Scale);
         }
-        genie!.Set(pose);
+        else if(Surface!=null)
+        {
+            bool created=EnsureGenieVisual(frame);
+            double w=Math.Max(1,PanelWidth),h=Math.Max(1,PanelHeight),scale=Math.Max(1,owner.Scale);
+            if(!meshAttached||created||!IsPrebakedValid(w,h,scale)||!genie!.IsBitmapBound(prebakedBitmap,PanelWidth,PanelHeight))
+            {
+                var bitmap=EnsurePrebakedBitmap();
+                genie!.SetBitmap(bitmap,PanelWidth,PanelHeight);
+            }
+            if(!meshAttached)
+            {
+                meshAttached=true;
+                Surface.Visibility=Visibility.Hidden;
+                Surface.Opacity=0;
+                Surface.IsHitTestVisible=false;
+                genie!.View.Visibility=Visibility.Visible;
+                genie.View.IsHitTestVisible=true;
+            }
+            genie!.Set(pose,owner.Scale);
+        }
         // The Surface retains its rounded alpha; the shared scene's soft exterior
         // projection needs the existing padding outside this stage's sheet rectangle.
-        if(shareShadow)genie.AttachShadow(contour);
+        if(shareShadow)genie!.AttachShadow(contour);
 #if MACDOCK_EXPERIENCE_CHECKS
-        genie.View.Opacity=DiagnosticRendering=="foreground"?0:1;
+        genie!.View.Opacity=DiagnosticRendering=="foreground"?0:1;
         RenderOptions.SetEdgeMode(genie.View,DiagnosticRendering=="msaa"?EdgeMode.Aliased:EdgeMode.Unspecified);
         contour.Visibility=DiagnosticRendering=="shadow"?Visibility.Hidden:Visibility.Visible;
         if(shareShadow&&DiagnosticRendering=="shadow")genie.DetachShadow();
@@ -198,19 +294,116 @@ internal sealed class DrawerWindow : GlassWindow
         owner.DrawerLayerFrame?.Invoke("end-normal-backdrop",MaterialSnapshot);
         SetSurfaceOpacity(1);
         UseFlatSurface();
-        if(!retainHiddenMesh||IsVisible)UpdateLayout();
+        if((legacyGenie||Surface?.IsArrangeValid!=true)&&(!retainHiddenMesh||IsVisible))UpdateLayout();
         owner.DrawerLayerFrame?.Invoke("end-after-layout",MaterialSnapshot);
     }
 
     internal void InvalidatePrebakedSurface(bool scheduleIdleWarm = true)
     {
         prebakedDirty = true;
-        prebakedBitmap = null;
+        if (legacyGenie) prebakedBitmap = null;
         if (scheduleIdleWarm && !scrollBakeIdle.IsEnabled && !deforming && !windowClosed && !prebakeQueued)
         {
             prebakeQueued = true;
             Dispatcher.BeginInvoke(DispatcherPriority.ApplicationIdle, new Action(WarmPrebakedSurface));
         }
+    }
+
+    static IconViewHost? FindIconHost(Border tile) =>
+        tile.Child is StackPanel panel && panel.Children.Count > 0 && panel.Children[0] is Grid iconGrid && iconGrid.Children.Count > 0
+            ? iconGrid.Children[0] as IconViewHost
+            : null;
+
+    internal DrawerIconDiagnostics EnsureIconsReady(bool loadMissingSynchronously)
+    {
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+        double dip = owner.Layout.DrawerIcon;
+        int total = visibleOrder.Count;
+        int ready = 0;
+        int blanks = 0;
+        int unarranged = 0;
+        int syncLoaded = 0;
+        bool visualChanged = false;
+        long hitsBefore = owner.IconCacheHits;
+        long loadsBefore = owner.IconLoads;
+
+        for (int i = 0; i < visibleOrder.Count; i++)
+        {
+            var e = visibleOrder[i];
+            var slot = owner.Icon(e.Path, dip);
+            if (slot.ApplyPending()) visualChanged = true;
+            if (loadMissingSynchronously && slot.Missing && slot.RetryCount < 3)
+            {
+                if (owner.EnsureIconLoadedNow(e.Path, dip))
+                {
+                    syncLoaded++;
+                    visualChanged = true;
+                }
+            }
+            if (tiles.TryGetValue(e.Id, out var tile) && FindIconHost(tile) is { } host)
+            {
+                if (host.EnsureRendered(slot)) visualChanged = true;
+                if (host.HasRenderedImage)
+                {
+                    ready++;
+                    if (!host.HasArrangedImage) unarranged++;
+                }
+                else blanks++;
+            }
+            else if (!slot.Missing) ready++;
+            else blanks++;
+        }
+
+        if (visualChanged || unarranged > 0 || prebakedTotalIcons != total || prebakedReadyIcons != ready)
+            prebakedDirty = true;
+
+        sw.Stop();
+        var diag = new DrawerIconDiagnostics(total, ready, blanks, unarranged, syncLoaded, owner.IconCacheHits - hitsBefore, owner.IconLoads - loadsBefore, Math.Round(sw.Elapsed.TotalMilliseconds, 3));
+        LastIconDiagnostics = diag;
+        return diag;
+    }
+
+    internal void OnSystemResume()
+    {
+        if (windowClosed) return;
+        EnsureIconsReady(loadMissingSynchronously: true);
+        prebakedBitmap = null;
+        prebakedReadyIcons = -1;
+        prebakedTotalIcons = -1;
+        prebakedDirty = true;
+        if (IsVisible && !deforming)
+            WarmPrebakedSurface(attachingMesh: true);
+        else
+            InvalidatePrebakedSurface(scheduleIdleWarm: true);
+    }
+
+    void EnsureSurfaceLayout()
+    {
+        if (Surface == null) return;
+        double w = Math.Max(1, PanelWidth);
+        double h = Math.Max(1, PanelHeight);
+        if (!Surface.IsArrangeValid || Math.Abs(Surface.RenderSize.Width - w) > 0.5 || Math.Abs(Surface.RenderSize.Height - h) > 0.5)
+        {
+            var size = new Size(w, h);
+            Surface.Measure(size);
+            Surface.Arrange(new Rect(size));
+        }
+        Surface.UpdateLayout();
+        bool fixedAny = false;
+        foreach (var tile in tiles.Values)
+        {
+            if (FindIconHost(tile) is { } host && host.Width > 0 && host.Height > 0 &&
+                (!host.IsArrangeValid || (host.HasRenderedImage && !host.HasArrangedImage)))
+            {
+                host.InvalidateMeasure();
+                host.InvalidateArrange();
+                var sz = new Size(host.Width, host.Height);
+                host.Measure(sz);
+                host.Arrange(new Rect(sz));
+                fixedAny = true;
+            }
+        }
+        if (fixedAny) Surface.UpdateLayout();
     }
 
     internal void WarmPrebakedSurface()=>WarmPrebakedSurface(false);
@@ -220,23 +413,23 @@ internal sealed class DrawerWindow : GlassWindow
         prebakeQueued = false;
         if(windowClosed||Surface==null||
             (!attachingMesh&&(deforming||scrollBakeIdle.IsEnabled||scroll.IsScrolling)))return;
+        if (pendingAnchor != null && !scroll.IsScrolling) RestoreScrollAnchor();
+        var diag = EnsureIconsReady(loadMissingSynchronously: attachingMesh);
         double w = Math.Max(1, PanelWidth);
         double h = Math.Max(1, PanelHeight);
         double scale = Math.Max(1, owner.Scale);
-        if (!prebakedDirty && prebakedBitmap != null &&
-            Math.Abs(prebakedWidth - w) < 0.1 &&
-            Math.Abs(prebakedHeight - h) < 0.1 &&
-            Math.Abs(prebakedScale - scale) < 0.001)
+        if (IsPrebakedValid(w, h, scale))
+        {
+            if (!legacyGenie && genie != null) genie.SetBitmap(prebakedBitmap!, w, h);
             return;
+        }
 
         var live = Surface;
-        if (!live.IsArrangeValid || Math.Abs(live.RenderSize.Width - w) > 0.5 || Math.Abs(live.RenderSize.Height - h) > 0.5)
-        {
-            var size = new Size(w, h);
-            live.Measure(size);
-            live.Arrange(new Rect(size));
-            live.UpdateLayout();
-        }
+        var prevVis = live.Visibility;
+        var prevOpacity = live.Opacity;
+        if (prevVis != Visibility.Visible) live.Visibility = Visibility.Visible;
+        if (prevOpacity < 1) live.Opacity = 1;
+        EnsureSurfaceLayout();
         int pxW = Math.Max(1, (int)Math.Round(w * scale));
         int pxH = Math.Max(1, (int)Math.Round(h * scale));
         double dpi = 96.0 * scale;
@@ -256,26 +449,39 @@ internal sealed class DrawerWindow : GlassWindow
         var rtb = new RenderTargetBitmap(pxW, pxH, dpi, dpi, PixelFormats.Pbgra32);
         rtb.Render(dv);
         rtb.Freeze();
+        if (prevOpacity < 1) live.Opacity = prevOpacity;
+        if (prevVis != Visibility.Visible) live.Visibility = prevVis;
         prebakedBitmap = rtb;
         prebakedWidth = w;
         prebakedHeight = h;
         prebakedScale = scale;
+        prebakedScrollOffset = scroll.VerticalOffset;
+        prebakedReadyIcons = diag.Ready;
+        prebakedTotalIcons = diag.Total;
         prebakedDirty = false;
+        if (!legacyGenie && genie != null) genie.SetBitmap(rtb, w, h);
     }
 
-    FrameworkElement BakeGenieSurface()
+    BitmapSource EnsurePrebakedBitmap()
     {
+        if (pendingAnchor != null) RestoreScrollAnchor();
         double w=Math.Max(1,PanelWidth);
         double h=Math.Max(1,PanelHeight);
         double scale=Math.Max(1,owner.Scale);
-        if(prebakedBitmap==null||prebakedDirty||
-            Math.Abs(prebakedWidth-w)>=0.1||Math.Abs(prebakedHeight-h)>=0.1||
-            Math.Abs(prebakedScale-scale)>=0.001)
+        if(!IsPrebakedValid(w,h,scale))
         {
             prebakedDirty=true;
             WarmPrebakedSurface(attachingMesh:true);
         }
-        var brush=new ImageBrush(prebakedBitmap!)
+        if(!legacyGenie&&genie!=null&&prebakedBitmap!=null)
+            genie.SetBitmap(prebakedBitmap,PanelWidth,PanelHeight);
+        return prebakedBitmap!;
+    }
+
+    FrameworkElement BakeGenieSurface()
+    {
+        var bmp=EnsurePrebakedBitmap();
+        var brush=new ImageBrush(bmp)
         {
             Stretch=Stretch.Fill,
             TileMode=TileMode.None,
@@ -286,8 +492,8 @@ internal sealed class DrawerWindow : GlassWindow
         brush.Freeze();
         bakedGenieSurface=new Border
         {
-            Width=w,
-            Height=h,
+            Width=Math.Max(1,PanelWidth),
+            Height=Math.Max(1,PanelHeight),
             Background=brush,
             IsHitTestVisible=false
         };
@@ -301,9 +507,12 @@ internal sealed class DrawerWindow : GlassWindow
             bakedGenieSurface.Background=null;
             bakedGenieSurface=null;
         }
-        prebakedBitmap=null;
-        prebakedDirty=true;
-        if(!windowClosed)InvalidatePrebakedSurface(scheduleIdleWarm:true);
+        if(legacyGenie)
+        {
+            prebakedBitmap=null;
+            prebakedDirty=true;
+            if(!windowClosed)InvalidatePrebakedSurface(scheduleIdleWarm:true);
+        }
     }
     readonly Border segment;
     readonly DockPanel toolbar,footer;
@@ -410,6 +619,7 @@ internal sealed class DrawerWindow : GlassWindow
         };
         Grid.SetRow(scroll, 4); main.Children.Add(scroll);
         SourceInitialized+=(_,_)=>HwndSource.FromHwnd(Handle).AddHook((nint h,int message,nint wp,nint lp,ref bool handled)=>{
+            if(message is 0x47 or 0x03 or 0x05)windowRectCached=false;
             if(message==0x84&&!AllowsTransparency){var screenPoint=new Native.Point(unchecked((short)lp.ToInt64()),unchecked((short)(lp.ToInt64()>>16)));if(!Contains(screenPoint)||owner.Dock.Contains(screenPoint)){handled=true;return -1;}}
             if(message!=0x20A||owner.InternalDragging||owner.MenuOpen||Mouse.Captured!=null||!IsActive||Surface==null)return 0;
             // Viewport2DVisual3D can drop the routed wheel event after its live
@@ -557,7 +767,7 @@ internal sealed class DrawerWindow : GlassWindow
         };
         PreviewMouseRightButtonDown += (_, _) => Native.SuppressAppStartingCursor();
         PreviewMouseRightButtonUp += (_, _) => Native.RestoreSystemCursors();
-        scroll.IsKeyboardFocusedChanged+=(_,_)=>{if(!scroll.IsKeyboardFocused)pendingFileKey=Key.None;ApplySelectionVisuals();};
+        scroll.IsKeyboardFocusedChanged+=(_,_)=>{if(!scroll.IsKeyboardFocused)pendingFileKey=Key.None;ApplySelectionVisuals(invalidatePrebake:false);};
         bool marqueeActive=false;Point marqueeStart=default;IDisposable? marqueeInteraction=null;
         static bool IsScrollBarHit(DependencyObject? d){while(d!=null){if(d is System.Windows.Controls.Primitives.ScrollBar)return true;d=d is Visual or System.Windows.Media.Media3D.Visual3D?VisualTreeHelper.GetParent(d):LogicalTreeHelper.GetParent(d);}return false;}
         void EndMarquee()
@@ -645,7 +855,19 @@ internal sealed class DrawerWindow : GlassWindow
             return 0;
         });
         Deactivated += (_, _) => c.RequestDrawerFocusCheck();
-        DpiChanged += (_, _) => { InvalidateDpiCache(); InvalidatePrebakedSurface(); ApplyLayout(); Render(); if (IsVisible && !IsDeforming) RefreshMaterial(); };
+        DpiChanged += (_, e) =>
+        {
+            if (!ReferenceEquals(e.OriginalSource, this)) return;
+            InvalidateDpiCache();
+            InvalidatePrebakedSurface();
+            Dispatcher.BeginInvoke(DispatcherPriority.Normal, new Action(() =>
+            {
+                if (windowClosed) return;
+                ApplyLayout();
+                Render();
+                if (IsVisible && !IsDeforming) RefreshMaterial();
+            }));
+        };
         Native.DropPreviewHelper.AttachWindow(this, () => EndDesktopDrop());
         scroll.ScrollChanged += (_, e) =>
         {
@@ -725,24 +947,29 @@ internal sealed class DrawerWindow : GlassWindow
     }
 
     public void Prepare() { ApplyLayout(); Render(); }
-    internal void PrepareForOpen()
+    internal void PrepareForOpen() => PrepareForOpen(loadMissingSynchronously: true);
+    internal void PrepareForOpen(bool loadMissingSynchronously)
     {
+        scroll.StopWheel();
+        scrollBakeIdle.Stop();
         ApplyLayout();
         RestoreScrollAnchor();
-        scrollBakeIdle.Stop();
-        WarmPrebakedSurface();
+        EnsureIconsReady(loadMissingSynchronously);
+        WarmPrebakedSurface(attachingMesh: loadMissingSynchronously);
     }
     internal void FinishScrollForClose()
     {
         scroll.StopWheel();
         scrollBakeIdle.Stop();
+        RestoreScrollAnchor();
     }
 
     ScrollAnchor? CaptureScrollAnchor(string? movedId=null)
     {
-        if(visibleOrder.Count==0||!groups.IsArrangeValid)return null;
+        if(visibleOrder.Count==0)return null;
         double offset=scroll.VerticalOffset;
         if(offset<.01)return new ScrollAnchor(Array.Empty<string>(),0,0,0);
+        if(!groups.IsArrangeValid)return new ScrollAnchor(Array.Empty<string>(),0,0,offset);
         var order=visibleOrder.Where(e=>e.Id!=movedId).Select(e=>e.Id).ToArray();
         double closest=double.PositiveInfinity;
         int index=0;
@@ -781,7 +1008,8 @@ internal sealed class DrawerWindow : GlassWindow
     {
         if(pendingAnchor is not {} anchor||windowClosed)return;
         pendingAnchor=null;
-        UpdateLayout();
+        EnsureSurfaceLayout();
+        double before=scroll.VerticalOffset;
         double offset=anchor.Offset;
         for(int distance=0;distance<anchor.Order.Length;distance++)
         {
@@ -793,15 +1021,36 @@ internal sealed class DrawerWindow : GlassWindow
                 break;
             }
         }
-        scroll.StopWheel();
-        scroll.ScrollToVerticalOffset(Math.Clamp(offset,0,scroll.ScrollableHeight));
-        UpdateLayout();
+        scroll.SetImmediateOffset(Math.Clamp(offset,0,scroll.ScrollableHeight));
+        EnsureSurfaceLayout();
+        if(Math.Abs(scroll.VerticalOffset-before)>=0.05||Math.Abs(scroll.VerticalOffset-prebakedScrollOffset)>=0.05)
+            InvalidatePrebakedSurface(scheduleIdleWarm:!deforming);
     }
     void UseFlatSurface()
     {
         stage.Clip=null;
         ConfigureSurfaceGeometry(1, clipToStage: true);
         genie?.DetachShadow();
+        if(!legacyGenie)
+        {
+            if(genie!=null)
+            {
+                genie.View.Visibility=Visibility.Hidden;
+                genie.View.IsHitTestVisible=false;
+            }
+            meshAttached=false;
+            if(Surface!=null)
+            {
+                Surface.Visibility=Visibility.Visible;
+                Surface.Opacity=1;
+                Surface.IsHitTestVisible=true;
+                Surface.Width=PanelWidth;Surface.Height=PanelHeight;
+                Surface.HorizontalAlignment=HorizontalAlignment.Left;Surface.VerticalAlignment=VerticalAlignment.Top;
+            }
+            if(!windowClosed&&!IsPrebakedValid(Math.Max(1,PanelWidth),Math.Max(1,PanelHeight),Math.Max(1,owner.Scale)))
+                InvalidatePrebakedSurface(scheduleIdleWarm:true);
+            return;
+        }
         if(meshAttached)
         {
             stage.Children.Clear();genie!.Detach();meshAttached=false;
@@ -968,9 +1217,10 @@ internal sealed class DrawerWindow : GlassWindow
     internal void SelectAll() { selected.Clear(); foreach (var e in visibleOrder) selected.Add(e.Id); cursorId??=visibleOrder.FirstOrDefault()?.Id; ApplySelectionVisuals(); }
     internal void ClearSelection()
     {
-        bool had = selected.Count > 0 || anchor != null || cursorId != null;
+        bool hadVisual = selected.Count > 0;
+        bool had = hadVisual || anchor != null || cursorId != null;
         selected.Clear(); anchor = null; cursorId = null;
-        if (had) ApplySelectionVisuals();
+        if (hadVisual) ApplySelectionVisuals();
         else UpdateFooter();
     }
 
@@ -1042,11 +1292,12 @@ internal sealed class DrawerWindow : GlassWindow
         }
     }
 
-    internal void ApplySelectionVisuals()
+    internal void ApplySelectionVisuals() => ApplySelectionVisuals(invalidatePrebake: true);
+    internal void ApplySelectionVisuals(bool invalidatePrebake)
     {
         foreach(var tile in tiles.Values)PaintTile(tile);
         UpdateFooter();
-        InvalidatePrebakedSurface();
+        if(invalidatePrebake)InvalidatePrebakedSurface();
     }
 
     void UpdateFooter()
@@ -1245,8 +1496,12 @@ internal sealed class DrawerWindow : GlassWindow
         // Remove only deleted or filtered-out tiles from their parent WrapPanels
         foreach (var oldTile in oldById.Values)
         {
-            if (!reusedTiles.Contains(oldTile) && oldTile.Parent is Panel parent)
-                parent.Children.Remove(oldTile);
+            if (!reusedTiles.Contains(oldTile))
+            {
+                FindIconHost(oldTile)?.Detach();
+                if (oldTile.Parent is Panel parent)
+                    parent.Children.Remove(oldTile);
+            }
         }
 
         tiles.Clear();
@@ -1294,10 +1549,17 @@ internal sealed class DrawerWindow : GlassWindow
                             !string.Equals(bound.Item1, e.Path, StringComparison.OrdinalIgnoreCase) ||
                             Math.Abs(bound.Item2 - l.DrawerIcon) > 0.1))
                         {
+                            (iconHost.Children[0] as IconViewHost)?.Detach();
                             iconHost.Children.RemoveAt(0);
-                            iconHost.Children.Insert(0, Icons.View(owner.Icon(e.Path, l.DrawerIcon), l.DrawerIcon, lightGlyphShadow:false));
+                            iconHost.Children.Insert(0, Icons.View(owner.Icon(e.Path, l.DrawerIcon), l.DrawerIcon, lightGlyphShadow:false,
+                                () => InvalidatePrebakedSurface(scheduleIdleWarm: !IsDeforming)));
                             iconHost.Tag = (e.Path, l.DrawerIcon);
                             InvalidatePrebakedSurface();
+                        }
+                        else if (iconHost != null && iconHost.Children.Count > 0 && iconHost.Children[0] is IconViewHost existingView)
+                        {
+                            if (existingView.EnsureRendered(owner.Icon(e.Path, l.DrawerIcon)))
+                                InvalidatePrebakedSurface(scheduleIdleWarm: !IsDeforming);
                         }
                         foreach (var label in panel.Children.OfType<TextBlock>())
                             if (label.Text != e.Name) label.Text = e.Name;

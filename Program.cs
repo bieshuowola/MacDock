@@ -94,7 +94,7 @@ internal static class Program
                 dockStability = args.Contains("--dock-stability-test");
                 fieldInteraction = args.Contains("--field-interaction-test");
                 wakeBindingCheck = args.Contains("--wake-binding-test");
-                testing|=args.Contains("--genie-idle-check");
+                testing|=args.Contains("--genie-idle-check")||args.Contains("--genie-benchmark-test");
                 drawerPasteReuse = args.Contains("--drawer-paste-reuse-test");
                 testing|=args.Contains("--experience-test")||productPreview||dragE2E||externalDropPin||drawerStability||dockStability||drawerPasteReuse||fieldInteraction||wakeBindingCheck||args.Contains("--update-ui-test")||args.Contains("--icon-sync-test");
 #endif
@@ -115,6 +115,7 @@ internal static class Program
                 if(args.Contains("--settings-release-test"))app.Dispatcher.BeginInvoke(DispatcherPriority.Normal,()=>{_=SettingsReleaseChecks.Run(c);});
 #if MACDOCK_EXPERIENCE_CHECKS
                 if(args.Contains("--genie-idle-check"))app.Dispatcher.BeginInvoke(DispatcherPriority.Normal,()=>{_=GenieIdleChecks.Run(c);});
+                if(args.Contains("--genie-benchmark-test"))app.Dispatcher.BeginInvoke(DispatcherPriority.Normal,()=>{_=GenieBenchmarkChecks.Run(c);});
                 if(fieldInteraction)app.Dispatcher.BeginInvoke(DispatcherPriority.Normal,()=>{_=FieldInteractionChecks.Run(c);});
                 if(wakeBindingCheck)app.Dispatcher.BeginInvoke(DispatcherPriority.ApplicationIdle,()=>{_=WakeBindingChecks.Run(c);});
                 if(args.Contains("--experience-test"))app.Dispatcher.BeginInvoke(DispatcherPriority.Normal,()=>{_=ExperienceChecks.Run(c);});
@@ -524,9 +525,9 @@ internal sealed class Controller : IDisposable
         StartupStage("input-ready");
         StartWatchers();RegisterShellChanges();safetySync.Start();WarmIcons();
         if(!skipDesktop)
-            System.Windows.Application.Current.Dispatcher.BeginInvoke(DispatcherPriority.ApplicationIdle,(Action)(()=>
+            System.Windows.Application.Current.Dispatcher.BeginInvoke(GenieEngine.IsLegacy?DispatcherPriority.ApplicationIdle:DispatcherPriority.Background,(Action)(()=>
             {
-                if(!disposed&&!displayUnavailable&&Drawer==null)EnsureDrawer();
+                if(!disposed&&!displayUnavailable&&Drawer==null){EnsureDrawer();if(!GenieEngine.IsLegacy)Drawer?.WarmStartup();}
             }));
         if(awaitingInitialDesktop)ScheduleSync();
         if(profile==null)_=Task.Run(EnsureStartupRegistration);
@@ -565,7 +566,7 @@ internal sealed class Controller : IDisposable
             ScheduleSync();
         });
     }
-    void PowerChanged(object? s,PowerModeChangedEventArgs e) { if(e.Mode==PowerModes.Resume)System.Windows.Application.Current.Dispatcher.BeginInvoke(()=> { ReinstallPointerHook();Position();CheckFullscreen();SyncDesktop(); }); }
+    void PowerChanged(object? s,PowerModeChangedEventArgs e) { if(e.Mode==PowerModes.Resume)System.Windows.Application.Current.Dispatcher.BeginInvoke(()=> { ReinstallPointerHook();Position();CheckFullscreen();SyncDesktop();ReconcileIcons();Drawer?.OnSystemResume(); }); }
     internal void TestResumeLifecycle()=>PowerChanged(null,new PowerModeChangedEventArgs(PowerModes.Resume));
 
     // ---------------------------------------------------------------- desktop mirror
@@ -745,6 +746,34 @@ internal sealed class Controller : IDisposable
         var px=Pixels(dip);
         return RequestIcon(path,px);
     }
+    internal bool EnsureIconLoadedNow(string path,double dip)
+    {
+        if(disposed)return false;
+        var px=Pixels(dip);
+        var slot=RequestIcon(path,px);
+        slot.ApplyPending();
+        if(!slot.Missing)return false;
+        var key=(path.ToUpperInvariant(),px);
+        int revision;
+        lock(iconGate)
+        {
+            if(slot.RetryCount>=3)return false;
+            revision=slot.Revision;
+            IconLoads++;
+        }
+        IconEntry result;string version;bool changed=false,validTarget=false;
+        try{IconResources.Describe(path);version=IconResources.Stamp(path);result=Icons.Measure(Native.Icon(path,px));if(result.Missing)validTarget=IsValidIconTarget(path);changed=version!=IconResources.Stamp(path);}
+        catch(Exception e){DiagnosticsLog.Error(e,"icon.load.sync");result=IconEntry.Empty;version=IconResources.Stamp(path);}
+        if(slot.Revision!=revision)return false;
+        if(!result.Missing)
+        {
+            slot.Update(result,changed?"":version);
+            lock(iconGate)iconRetryAfter.Remove(key);
+            return true;
+        }
+        if(!validTarget)slot.RetryCount=3;
+        return false;
+    }
     IconEntry RequestIcon(string path,int px)
     {
         if(disposed)return IconEntry.Empty;
@@ -752,7 +781,15 @@ internal sealed class Controller : IDisposable
         int revision;
         lock(iconGate)
         {
-            if(!icons.TryGetValue(key,out slot!)){if(icons.Count>=2048)EvictStaleIcon();icons[key]=slot=new IconEntry();}
+            if(!icons.TryGetValue(key,out slot!))
+            {
+                if(icons.Count>=2048)EvictStaleIcon();
+                icons[key]=slot=new IconEntry();
+                foreach(var kv in icons)
+                {
+                    if(kv.Key.Path==key.Item1&&!kv.Value.Missing){slot.SeedFrom(kv.Value);break;}
+                }
+            }
             // Watchers and the asynchronous reconciliation own stamp validation.
             // Creating/reusing a tile must not open its target or read the registry.
             if(slot.Loading||(slot.Stamp.Length!=0&&(!slot.Missing||slot.RetryCount>=3))){IconCacheHits++;return slot;}
@@ -767,13 +804,14 @@ internal sealed class Controller : IDisposable
             IconEntry result;string version;bool changed=false,validTarget=false;
             try{IconResources.Describe(path);version=IconResources.Stamp(path);result=Icons.Measure(Native.Icon(path,px));if(result.Missing&&(validTarget=IsValidIconTarget(path)))DiagnosticsLog.Event("icon.unavailable",new{pixels=px,shell=path.StartsWith("::",StringComparison.Ordinal)});changed=version!=IconResources.Stamp(path);}
             catch(Exception e){DiagnosticsLog.Error(e,"icon.load");result=IconEntry.Empty;version=IconResources.Stamp(path);}
+            if(!changed&&slot.Revision==revision&&!result.Missing)slot.StagePending(result,version,revision);
             System.Windows.Application.Current.Dispatcher.BeginInvoke(DispatcherPriority.Background,()=>
             {
                 if(disposed)return;
                 if(slot.Revision!=revision||changed){slot.Loading=false;slot.Stamp="";lock(iconGate)iconRetryAfter.Remove(key);RequestIcon(path,px);return;}
                 bool pixelsChanged=slot.Missing||slot.Fingerprint!=result.Fingerprint;
                 slot.Update(result,version);
-                if(!result.Missing){lock(iconGate)iconRetryAfter.Remove(key);if(pixelsChanged&&Drawer!=null&&!Drawer.IsDeforming)Drawer.InvalidatePrebakedSurface();return;}
+                if(!result.Missing){lock(iconGate)iconRetryAfter.Remove(key);if(pixelsChanged&&Drawer!=null)Drawer.InvalidatePrebakedSurface(scheduleIdleWarm:!Drawer.IsDeforming);return;}
                 if(!validTarget)slot.RetryCount=3;
                 if(slot.RetryCount<3)
                 {
@@ -989,7 +1027,7 @@ internal sealed class Controller : IDisposable
     internal void UpdateModalRegions()
     {
         if(modal==null)return;
-        modal.Current=!drawerLostForeground&&Drawer is {IsVisible:true}&&Native.GetWindowRect(Drawer.Handle,out var rect)
+        modal.Current=!drawerLostForeground&&Drawer is {IsVisible:true}&&Drawer.Handle!=0
             ?new ModalInputGate.Regions(Drawer.BodyBounds,dockRect,MenuOpen||Busy||InternalDragging||AutoHideBlocked,Drawer.Handle,Dock.Handle,Drawer.TextInputActive,drawerToken!=0&&!drawerClosing,Drawer.CurrentPose,Scale,!Drawer.AllowsTransparency,settingsHandle):null;
         if(Drawer?.IsVisible!=true)modal.FinishDismissal();
     }
@@ -1338,11 +1376,25 @@ internal sealed class Controller : IDisposable
         long started=Stopwatch.GetTimestamp();
         drawerFrameStamp=0;drawerMaxFrameMs=0;
         drawerClosing=false;int token=drawerToken=++drawerEpoch;
-        if(fresh){drawerMotion.Snap(0);var gateway=Dock.GatewayCenter;drawerAnchorX=(gateway.X-target.Left)/Scale-d.MaterialInset;drawerAnchorY=(gateway.Y-target.Top)/Scale-d.MaterialInset;new WindowInteropHelper(d).EnsureHandle();d.Place(target.Left,target.Top);d.SetSurfaceOpacity(0);d.SetGenie(0,drawerAnchorX,drawerAnchorY);MeasureDrawerStage("pose-ready");d.Show();MeasureDrawerStage("window-shown");d.Place(target.Left,target.Top);}
+        if(fresh)
+        {
+            drawerMotion.Snap(0);
+            var gateway=Dock.GatewayCenter;
+            drawerAnchorX=(gateway.X-target.Left)/Scale-d.MaterialInset;
+            drawerAnchorY=(gateway.Y-target.Top)/Scale-d.MaterialInset;
+            new WindowInteropHelper(d).EnsureHandle();
+            d.Place(target.Left,target.Top);
+            if(GenieEngine.IsLegacy)d.SetSurfaceOpacity(0);
+            d.SetGenie(0,drawerAnchorX,drawerAnchorY);
+            MeasureDrawerStage("pose-ready");
+            d.Show();
+            MeasureDrawerStage("window-shown");
+            d.Place(target.Left,target.Top);
+        }
         else if(!d.IsDeforming){var gateway=Dock.GatewayCenter;drawerAnchorX=(gateway.X-target.Left)/Scale-d.MaterialInset;drawerAnchorY=(gateway.Y-target.Top)/Scale-d.MaterialInset;d.SetGenie(drawerMotion.Value,drawerAnchorX,drawerAnchorY);}
         if(!d.IsActive)d.Activate();
         if(fresh)d.FocusGrid();
-        d.UpdateLayout();
+        if(GenieEngine.IsLegacy||d.Surface?.IsArrangeValid!=true)d.UpdateLayout();
         MeasureDrawerStage("layout-ready");
         // Only our two surfaces are reordered, once, before the transition. No changes
         // during native menu tracking; the extended curved neck cannot cover the button.
@@ -1411,9 +1463,12 @@ internal sealed class Controller : IDisposable
         drawerToken=0;drawerClosing=false;
         if(open)
         {
-            d.EndGenie();d.SetSurfaceOpacity(1);
+            d.EndGenie();
+            if(GenieEngine.IsLegacy)d.SetSurfaceOpacity(1);
             if(d.IsActive&&!MenuOpen&&(!d.IsKeyboardFocusWithin||Keyboard.FocusedElement==d))d.FocusGrid();
-            Position();if(desktopDirty){syncDebounce.Stop();syncDebounce.Start();}
+            if(GenieEngine.IsLegacy||WorkArea!=Native.MonitorArea(Screen,true))Position();
+            else UpdateModalRegions();
+            if(desktopDirty){syncDebounce.Stop();syncDebounce.Start();}
         }
         else
         {

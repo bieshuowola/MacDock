@@ -86,7 +86,7 @@ internal sealed class DockWindow : GlassWindow
         PreviewKeyDown+=OnDockKey;
         Deactivated+=(_,_)=>{if(KeyboardActive){EndKeyboard();owner.DockKeyboardEnded();}};
         SizeChanged+=(_,_)=>SetReveal(reveal);
-        DpiChanged+=(_,_)=>{if(!IsLoaded)return;InvalidateDpiCache();RefreshMaterial();owner.Position();};
+        DpiChanged+=(_,e)=>{if(!IsLoaded||!ReferenceEquals(e.OriginalSource,this))return;InvalidateDpiCache();RefreshMaterial();owner.Position();};
         PreviewMouseDown+=(_,a)=>
         {
             CancelTip(true);owner.SettleDockMotion();
@@ -1114,7 +1114,8 @@ internal sealed class DockWindow : GlassWindow
             Width = iconSize, Height = iconSize, RenderTransformOrigin = new Point(.5, .55),
             RenderTransform = iconScale, Tag = (e.Path, iconSize)
         };
-        iconHost.Children.Add(Icons.View(owner.Icon(e.Path, iconSize), iconSize, lightGlyphShadow:!inDrawer));
+        iconHost.Children.Add(Icons.View(owner.Icon(e.Path, iconSize), iconSize, lightGlyphShadow:!inDrawer,
+            inDrawer ? () => owner.Drawer?.InvalidatePrebakedSurface(scheduleIdleWarm: owner.Drawer?.IsDeforming != true) : null));
         if(inDrawer)Theme.AddTileShadow(iconHost,root,()=>owner.Store.Data.ReducedMotion);
         panel.Children.Add(iconHost);
         if (inDrawer)

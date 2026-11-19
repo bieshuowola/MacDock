@@ -19,14 +19,57 @@ internal sealed class IconEntry
     internal int Revision;
     internal int RetryCount;
     internal string Fingerprint="";
-    ImageSource? artwork;
+    internal ImageSource? artwork;
+    readonly object pendingGate=new();
+    IconEntry? pendingResult;
+    string? pendingStamp;
+    int pendingRevision;
     internal ImageSource? Artwork
     {
         get{if(artwork!=null)return artwork;artwork=Image;if(Image is BitmapSource bitmap&&Content.Width>0&&Content.Height>0){var crop=new CroppedBitmap(bitmap,Content);crop.Freeze();artwork=crop;}return artwork;}
     }
     internal event EventHandler? Changed;
+    internal void StagePending(IconEntry result,string stamp,int revision)
+    {
+        lock(pendingGate)
+        {
+            if(revision!=Revision)return;
+            pendingResult=result;
+            pendingStamp=stamp;
+            pendingRevision=revision;
+        }
+    }
+    internal bool ApplyPending()
+    {
+        IconEntry? next;
+        string? stamp;
+        int rev;
+        lock(pendingGate)
+        {
+            if(pendingResult==null)return false;
+            next=pendingResult;
+            stamp=pendingStamp;
+            rev=pendingRevision;
+            pendingResult=null;
+            pendingStamp=null;
+        }
+        if(rev!=Revision||next==null)return false;
+        Update(next,stamp??"");
+        return !Missing;
+    }
+    internal void SeedFrom(IconEntry existing)
+    {
+        if(existing.Missing||Image!=null)return;
+        Image=existing.Image;
+        Content=existing.Content;
+        Filled=existing.Filled;
+        LightGlyph=existing.LightGlyph;
+        artwork=existing.artwork;
+        Fingerprint=existing.Fingerprint;
+    }
     internal void Update(IconEntry next,string stamp)
     {
+        lock(pendingGate){pendingResult=null;pendingStamp=null;}
         if(next.Missing)
         {
             GestureChecks.Trace?.Invoke("icon-update",new{slot=System.Runtime.CompilerServices.RuntimeHelpers.GetHashCode(this),same=false,missing=true,preserved=Image!=null,oldStamp=Stamp,stamp,preserve=Icons.PreserveVisuals});
@@ -39,10 +82,108 @@ internal sealed class IconEntry
         GestureChecks.Trace?.Invoke("icon-update",new{slot=System.Runtime.CompilerServices.RuntimeHelpers.GetHashCode(this),same,oldStamp=Stamp,stamp,preserve=Icons.PreserveVisuals});
         Stamp=stamp;Loading=false;
         if(Icons.PreserveVisuals&&same)return;
-        Image=next.Image;Content=next.Content;Filled=next.Filled;LightGlyph=next.LightGlyph;Fingerprint=next.Fingerprint;artwork=null;Changed?.Invoke(this,EventArgs.Empty);
+        Image=next.Image;Content=next.Content;Filled=next.Filled;LightGlyph=next.LightGlyph;Fingerprint=next.Fingerprint;artwork=next.artwork;Changed?.Invoke(this,EventArgs.Empty);
     }
     public bool Missing => Image == null;
     public static readonly IconEntry Empty = new();
+}
+
+internal sealed class IconViewHost : Grid
+{
+    IconEntry icon;
+    readonly double box;
+    readonly bool lightGlyphShadow;
+    readonly Action? onVisualChanged;
+    bool subscribed;
+    bool rendered,dark,light,filled;
+    ImageSource? last;
+    Int32Rect content;
+
+    internal IconEntry CurrentIcon => icon;
+    internal bool HasRenderedImage => rendered && last != null;
+    internal bool HasArrangedImage => Children.Count > 0 && Children[0] is Image img && img.IsArrangeValid && img.RenderSize.Width > 0 && img.RenderSize.Height > 0;
+
+    internal IconViewHost(IconEntry icon,double box,bool lightGlyphShadow,Action? onVisualChanged)
+    {
+        this.icon=icon;
+        this.box=box;
+        this.lightGlyphShadow=lightGlyphShadow;
+        this.onVisualChanged=onVisualChanged;
+        Width=box;
+        Height=box;
+        IsHitTestVisible=false;
+        ClipToBounds=false;
+        Subscribe();
+        Render(notify:false);
+        Loaded+=(_,_)=>{Subscribe();Render(notify:true);};
+        Unloaded+=(_,_)=>Unsubscribe();
+    }
+
+    void OnIconChanged(object? sender,EventArgs e)=>Render(notify:true);
+    void OnThemeChanged()=>Render(notify:true);
+
+    void Subscribe()
+    {
+        if(subscribed)return;
+        icon.Changed-=OnIconChanged;
+        icon.Changed+=OnIconChanged;
+        Theme.Changed-=OnThemeChanged;
+        Theme.Changed+=OnThemeChanged;
+        subscribed=true;
+    }
+
+    void Unsubscribe()
+    {
+        if(!subscribed)return;
+        icon.Changed-=OnIconChanged;
+        Theme.Changed-=OnThemeChanged;
+        subscribed=false;
+    }
+
+    internal void Detach()=>Unsubscribe();
+
+    bool Render(bool notify)
+    {
+        if(Icons.PreserveVisuals&&rendered&&ReferenceEquals(last,icon.Image)&&content==icon.Content&&light==icon.LightGlyph&&filled==icon.Filled&&dark==Theme.Dark)
+            return false;
+        GestureChecks.Trace?.Invoke("icon-view-render",new{slot=System.Runtime.CompilerServices.RuntimeHelpers.GetHashCode(icon),box,loaded=IsLoaded,preserve=Icons.PreserveVisuals});
+        Children.Clear();
+        Icons.RenderInto(this,icon,box,lightGlyphShadow);
+        rendered=true;
+        last=icon.Image;
+        content=icon.Content;
+        light=icon.LightGlyph;
+        filled=icon.Filled;
+        dark=Theme.Dark;
+        if(notify)onVisualChanged?.Invoke();
+        return true;
+    }
+
+    internal bool EnsureRendered(IconEntry currentIcon)
+    {
+        currentIcon.ApplyPending();
+        if(!ReferenceEquals(icon,currentIcon))
+        {
+            if(subscribed)
+            {
+                icon.Changed-=OnIconChanged;
+                currentIcon.Changed-=OnIconChanged;
+                currentIcon.Changed+=OnIconChanged;
+            }
+            icon=currentIcon;
+        }
+        Subscribe();
+        bool changed=Render(notify:false);
+        if(Width>0&&Height>0&&(!IsArrangeValid||(Children.Count>0&&Children[0] is FrameworkElement child&&(!child.IsArrangeValid||child.RenderSize.Width<=0||child.RenderSize.Height<=0))))
+        {
+            InvalidateMeasure();
+            InvalidateArrange();
+            var sz=new Size(Width,Height);
+            Measure(sz);
+            Arrange(new Rect(sz));
+        }
+        return changed;
+    }
 }
 
 internal static class Icons
@@ -93,28 +234,25 @@ internal static class Icons
         if (maxX < minX || maxY < minY) return new IconEntry();
 
         // Keep the original silhouette. Bounds are measured for optical fitting, never cropping.
-        var w = maxX - minX + 1; var h = maxY - minY + 1;
+        var contentRect = new Int32Rect(minX, minY, maxX - minX + 1, maxY - minY + 1);
+        var w = contentRect.Width; var h = contentRect.Height;
         var filled = w >= width * .94 && h >= height * .94;
-        return new IconEntry { Image = image, Content = new Int32Rect(minX, minY, maxX - minX + 1, maxY - minY + 1), Filled = filled,LightGlyph=opaque>0&&light>opaque*.80&&opaque<width*height*.75,Fingerprint=fingerprint };
+        ImageSource? artwork = image;
+        if (bitmap.IsFrozen && contentRect.Width > 0 && contentRect.Height > 0)
+        {
+            var crop = new CroppedBitmap(bitmap, contentRect);
+            crop.Freeze();
+            artwork = crop;
+        }
+        return new IconEntry { Image = image, Content = contentRect, Filled = filled, LightGlyph = opaque > 0 && light > opaque * .80 && opaque < width * height * .75, Fingerprint = fingerprint, artwork = artwork };
     }
 
     /// <summary>
     /// Uniform optical fitting, preserving the complete original artwork and aspect ratio.
     /// </summary>
-    public static FrameworkElement View(IconEntry icon, double box, bool lightGlyphShadow = true)
-    {
-        var host = new Grid { Width = box, Height = box, IsHitTestVisible = false, ClipToBounds = false };
-        bool rendered=false,dark=false,light=false,filled=false;ImageSource? last=null;Int32Rect content=default;
-        void Render(){
-            if(PreserveVisuals&&rendered&&ReferenceEquals(last,icon.Image)&&content==icon.Content&&light==icon.LightGlyph&&filled==icon.Filled&&dark==Theme.Dark)return;
-            GestureChecks.Trace?.Invoke("icon-view-render",new{slot=System.Runtime.CompilerServices.RuntimeHelpers.GetHashCode(icon),box,loaded=host.IsLoaded,preserve=PreserveVisuals});
-            host.Children.Clear();RenderInto(host,icon,box,lightGlyphShadow);rendered=true;last=icon.Image;content=icon.Content;light=icon.LightGlyph;filled=icon.Filled;dark=Theme.Dark;
-        }
-        EventHandler update=(_,_)=>Render();
-        host.Loaded+=(_,_)=>{icon.Changed-=update;icon.Changed+=update;Theme.Changed-=Render;Theme.Changed+=Render;Render();};host.Unloaded+=(_,_)=>{icon.Changed-=update;Theme.Changed-=Render;};
-        Render();return host;
-    }
-    static void RenderInto(Grid host,IconEntry icon,double box,bool lightGlyphShadow)
+    public static FrameworkElement View(IconEntry icon, double box, bool lightGlyphShadow = true, Action? onVisualChanged = null)
+        => new IconViewHost(icon, box, lightGlyphShadow, onVisualChanged);
+    internal static void RenderInto(Grid host,IconEntry icon,double box,bool lightGlyphShadow)
     {
         if (icon.Image == null)
         {

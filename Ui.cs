@@ -328,7 +328,7 @@ internal class GlassWindow : Window
             System.Windows.Shell.WindowChrome.SetWindowChrome(this,new System.Windows.Shell.WindowChrome{CaptionHeight=0,ResizeBorderThickness=new Thickness(0),GlassFrameThickness=new Thickness(-1),UseAeroCaptionButtons=false});
         if(material)
         {
-            void RefreshAfterLayout()=>Dispatcher.BeginInvoke(DispatcherPriority.Background,()=>{if(IsVisible)RefreshMaterial();});
+            void RefreshAfterLayout()=>Dispatcher.BeginInvoke(DispatcherPriority.Background,()=>{if(IsVisible&&this is not DrawerWindow { IsDeforming: true })RefreshMaterial();});
             Loaded+=(_,_)=>RefreshAfterLayout();Activated+=(_,_)=>RefreshAfterLayout();DpiChanged+=(_,_)=>{UpdateCachedDpi();RefreshAfterLayout();};
         }
         SourceInitialized += (_, _) =>
@@ -429,6 +429,12 @@ internal sealed class SmoothScrollViewer : ScrollViewer
     {
         if(Content is DrawerScrollViewport view)view.SetVerticalOffset(value);
         else ScrollToVerticalOffset(value);
+    }
+    internal void SetImmediateOffset(double value)
+    {
+        CancelWheel();
+        ApplyOffset(value);
+        target = appliedOffset = VerticalOffset;
     }
     double target, wheelStart, appliedOffset;
     long wheelStartTime;

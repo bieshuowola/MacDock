@@ -57,20 +57,23 @@ internal static class Dialogs
         }
         Button ButtonFor(string label,Action click)
         {
-            var button=new Button{Style=Theme.Style("Pill"),Content=label,MinHeight=30,Padding=new Thickness(11,3,11,3)};
+            var button=new Button{Style=Theme.Style("Pill"),Content=label,Height=30,MinHeight=30,Padding=new Thickness(11,0,11,0),VerticalContentAlignment=VerticalAlignment.Center,UseLayoutRounding=true,SnapsToDevicePixels=true};
             button.Click+=(_,_)=>click();
             return button;
         }
         UIElement Row(string label,FrameworkElement control)
         {
-            var row=new DockPanel{Margin=new Thickness(0,2,0,2),MinHeight=30};
-            control.VerticalAlignment=VerticalAlignment.Center;
-            System.Windows.Automation.AutomationProperties.SetName(control,label);
-            DockPanel.SetDock(control,Dock.Right);
-            row.Children.Add(control);
+            var row=new Grid{Margin=new Thickness(0,3,0,3),MinHeight=32,UseLayoutRounding=true};
+            row.ColumnDefinitions.Add(new ColumnDefinition{Width=new GridLength(1,GridUnitType.Star)});
+            row.ColumnDefinitions.Add(new ColumnDefinition{Width=GridLength.Auto});
             var text=Theme.Text(label,13);
             text.VerticalAlignment=VerticalAlignment.Center;text.TextWrapping=TextWrapping.Wrap;
-            text.Margin=new Thickness(0,0,8,0);row.Children.Add(text);
+            text.Margin=new Thickness(0,0,12,0);
+            Grid.SetColumn(text,0);row.Children.Add(text);
+            control.HorizontalAlignment=HorizontalAlignment.Right;
+            control.VerticalAlignment=VerticalAlignment.Center;
+            System.Windows.Automation.AutomationProperties.SetName(control,label);
+            Grid.SetColumn(control,1);row.Children.Add(control);
             return row;
         }
         CheckBox Toggle(bool value,Func<bool,bool> save)
@@ -96,10 +99,10 @@ internal static class Dialogs
         var swallowAfterRecord=new HashSet<int>();
         string? recordingError=null;
         var bindKey=ButtonFor(c.WakeShortcutDisplay,()=>{});
-        bindKey.MinWidth=108;bindKey.Margin=new Thickness(0);bindKey.Effect=null;bindKey.FocusVisualStyle=null;
+        bindKey.MinWidth=132;bindKey.Padding=new Thickness(12,0,12,0);bindKey.Margin=new Thickness(0);bindKey.Effect=null;bindKey.FocusVisualStyle=null;
         InputMethod.SetIsInputMethodEnabled(bindKey,false);
         var clearKey=ButtonFor("清除",()=>{});
-        clearKey.Margin=new Thickness(6,0,0,0);clearKey.Effect=null;clearKey.FocusVisualStyle=null;
+        clearKey.MinWidth=54;clearKey.Padding=new Thickness(11,0,11,0);clearKey.Margin=new Thickness(6,0,0,0);clearKey.Effect=null;clearKey.FocusVisualStyle=null;
         void RefreshSuppressButtons()
         {
             bindKey.Content=recordingKey?(recordingError??"请按下按键…"):c.WakeShortcutDisplay;
@@ -127,7 +130,7 @@ internal static class Dialogs
         RefreshSuppressButtons();
         bindKey.Click+=(_,_)=>{if(recordingKey){EndRecording();return;}swallowAfterRecord.Clear();recordingKey=true;c.SetWakeRecording(true);RefreshSuppressButtons();bindKey.Focus();};
         clearKey.Click+=(_,_)=>{swallowAfterRecord.Clear();c.SetWakeShortcut(null);EndRecording();};
-        var suppressPanel=new StackPanel{Orientation=Orientation.Horizontal,HorizontalAlignment=HorizontalAlignment.Right,VerticalAlignment=VerticalAlignment.Center,Background=Brushes.Transparent,Margin=new Thickness(0)};
+        var suppressPanel=new StackPanel{Orientation=Orientation.Horizontal,HorizontalAlignment=HorizontalAlignment.Right,VerticalAlignment=VerticalAlignment.Center,Background=Brushes.Transparent,Margin=new Thickness(0),UseLayoutRounding=true,SnapsToDevicePixels=true};
         suppressPanel.Children.Add(bindKey);suppressPanel.Children.Add(clearKey);
         w.PreviewKeyDown+=(_,a)=>
         {
@@ -193,7 +196,8 @@ internal static class Dialogs
         var suppressRow=Row("临时关闭 MacDock",suppressPanel);
         var suppressDesc=Theme.Text("设置一个快捷键，按下后临时关闭 MacDock 的自动弹出功能，再次按下即可恢复。MacDock 仍在后台运行，底部唤醒小横条保持可用。",11.5,true);
         suppressDesc.TextWrapping=TextWrapping.Wrap;
-        suppressDesc.Margin=new Thickness(0,2,0,4);
+        suppressDesc.LineHeight=17.5;
+        suppressDesc.Margin=new Thickness(0,5,0,3);
         var suppressBlock=new StackPanel();
         suppressBlock.Children.Add(suppressRow);
         suppressBlock.Children.Add(suppressDesc);
