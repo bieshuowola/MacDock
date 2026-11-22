@@ -30,6 +30,7 @@ internal sealed class RunningApplications
     readonly ConcurrentQueue<Launch> pendingLaunches=new();
     readonly List<Launch> launches=new();
     readonly Dictionary<Target,Dictionary<Instance,Association>> previous=new();
+    readonly object sync=new();
     static readonly uint Session=ProcessIdToSessionId((uint)Environment.ProcessId,out uint session)?session:uint.MaxValue;
 
     internal void RememberLaunch(Target? target,Process? process)
@@ -55,61 +56,168 @@ internal sealed class RunningApplications
 
     internal HashSet<Target> Scan(IReadOnlyCollection<Target> targets)
     {
-        var results=new HashSet<Target>();
-        while(pendingLaunches.TryDequeue(out var launch))launches.Add(launch);
-        var exitedLaunches=new List<(Launch Launch,long Exited)>();
-        for(int i=launches.Count-1;i>=0;i--)
+        lock(sync)
         {
-            var launch=launches[i];
-            if(!targets.Contains(launch.Target))
+            var results=new HashSet<Target>();
+            while(pendingLaunches.TryDequeue(out var launch))launches.Add(launch);
+            var exitedLaunches=new List<(Launch Launch,long Exited)>();
+            for(int i=launches.Count-1;i>=0;i--)
             {
-                launch.Process.Dispose();
-                launches.RemoveAt(i);
+                var launch=launches[i];
+                if(!targets.Contains(launch.Target))
+                {
+                    launch.Process.Dispose();
+                    launches.RemoveAt(i);
+                }
+                else if(launch.Process.HasExited)
+                {
+                    exitedLaunches.Add((launch,launch.Process.ExitTime.ToFileTimeUtc()));
+                    launch.Process.Dispose();
+                    launches.RemoveAt(i);
+                }
             }
-            else if(launch.Process.HasExited)
+            if(targets.Count==0){previous.Clear();return results;}
+            var visible=Native.ApplicationWindowProcessIds();
+            var argumentImages=targets.Where(t=>t.Arguments.Length!=0).Select(t=>t.Image!).ToHashSet(StringComparer.OrdinalIgnoreCase);
+            var ids=new HashSet<uint>();
+            var processes=Snapshot(targets.Any(t=>t.AppId!=null),argumentImages,ids);
+            foreach(var target in previous.Keys.Except(targets).ToArray())previous.Remove(target);
+            foreach(var target in targets)
             {
-                exitedLaunches.Add((launch,launch.Process.ExitTime.ToFileTimeUtc()));
-                launch.Process.Dispose();
-                launches.RemoveAt(i);
+                var associated=Associate(target,processes,ids,exitedLaunches);
+                foreach(var match in associated.Values)
+                    if(match.Main||visible.Contains(match.Process.Instance.Id))results.Add(target);
+                previous[target]=associated;
             }
+            return results;
         }
-        if(targets.Count==0){previous.Clear();return results;}
-        var visible=Native.ApplicationWindowProcessIds();
-        var argumentImages=targets.Where(t=>t.Arguments.Length!=0).Select(t=>t.Image!).ToHashSet(StringComparer.OrdinalIgnoreCase);
-        var ids=new HashSet<uint>();
-        var processes=Snapshot(targets.Any(t=>t.AppId!=null),argumentImages,ids);
-        foreach(var target in previous.Keys.Except(targets).ToArray())previous.Remove(target);
-        foreach(var target in targets)
-        {
-            var associated=new Dictionary<Instance,Association>();
-            var parents=new Dictionary<uint,Association>();
-            previous.TryGetValue(target,out var prior);
-            string[]? arguments=target.Arguments.Length==0?null:SplitArguments("app.exe "+target.Arguments);
-            string? appFolder=ApplicationFolder(target.Image);
-            var exitedParents=exitedLaunches.Where(l=>l.Launch.Target==target)
-                .ToLookup(l=>l.Launch.Instance.Id);
-            foreach(var p in processes)
-            {
-                bool main=target.AppId!=null
-                    ?string.Equals(target.AppId,p.AppId,StringComparison.OrdinalIgnoreCase)
-                    :string.Equals(target.Image,p.Path,StringComparison.OrdinalIgnoreCase)&&
-                        (target.Arguments.Length==0||arguments!=null&&p.Arguments!=null&&arguments.SequenceEqual(p.Arguments));
+    }
 
-                bool child=appFolder!=null&&p.Path.StartsWith(appFolder,StringComparison.OrdinalIgnoreCase)&&
-                    (parents.TryGetValue(p.Parent,out var parent)&&parent.Process.Instance.Created<p.Instance.Created||
-                     prior!=null&&prior.TryGetValue(p.Instance,out var existing)&&!existing.Main||
-                     !ids.Contains(p.Parent)&&
-                        (exitedParents[p.Parent].Any(l=>l.Launch.Instance.Created<p.Instance.Created&&p.Instance.Created<=l.Exited)||
-                         prior!=null&&prior.Values.Any(a=>a.Process.Instance.Id==p.Parent&&a.Process.Instance.Created<p.Instance.Created)));
-                if(!main&&!child)continue;
-                var match=new Association(p,main&&!child);
-                associated[p.Instance]=match;
-                parents[p.Instance.Id]=match;
-                if(match.Main||visible.Contains(p.Instance.Id))results.Add(target);
-            }
-            previous[target]=associated;
+    internal IReadOnlyList<nint> ClosableWindows(Target? target)
+    {
+        if(target==null)return Array.Empty<nint>();
+        var windows=Native.ApplicationWindows();
+        if(windows.Count==0)return Array.Empty<nint>();
+        string[]? arguments=target.Arguments.Length==0?null:SplitArguments("app.exe "+target.Arguments);
+        string? appFolder=ApplicationFolder(target.Image);
+
+        Dictionary<Instance,Association>? priorSnapshot=null;
+        lock(sync)
+        {
+            if(previous.TryGetValue(target,out var prior)&&prior.Count>0)
+                priorSnapshot=new Dictionary<Instance,Association>(prior);
         }
-        return results;
+
+        var queried=new Dictionary<uint,ProcessInfo?>();
+        ProcessInfo? Query(uint pid)
+        {
+            if(queried.TryGetValue(pid,out var cached))return cached;
+            var info=QueryProcess(pid,target.AppId!=null,target.Arguments.Length!=0?target.Image:null);
+            queried[pid]=info;
+            return info;
+        }
+
+        bool MatchesDirect(ProcessInfo p) =>
+            target.AppId!=null
+                ?string.Equals(target.AppId,p.AppId,StringComparison.OrdinalIgnoreCase)
+                :string.Equals(target.Image,p.Path,StringComparison.OrdinalIgnoreCase)&&
+                    (target.Arguments.Length==0||arguments!=null&&p.Arguments!=null&&arguments.SequenceEqual(p.Arguments));
+
+        var handles=new List<nint>();
+        var seenHandles=new HashSet<nint>();
+        bool candidateInAppFolder=false;
+
+        foreach(var w in windows)
+        {
+            uint effectivePid=w.HostedProcessId!=0?w.HostedProcessId:w.ProcessId;
+            var info=Query(effectivePid);
+            if(info==null)continue;
+            bool matched=MatchesDirect(info)||(priorSnapshot!=null&&priorSnapshot.ContainsKey(info.Instance));
+            if(matched)
+            {
+                if(seenHandles.Add(w.Handle))handles.Add(w.Handle);
+            }
+            else if(appFolder!=null&&info.Path.StartsWith(appFolder,StringComparison.OrdinalIgnoreCase))
+            {
+                candidateInAppFolder=true;
+            }
+        }
+
+        if(candidateInAppFolder)
+        {
+            Dictionary<Instance,Association> associated;
+            lock(sync)
+            {
+                var argumentImages=target.Arguments.Length!=0&&target.Image!=null
+                    ?new HashSet<string>(StringComparer.OrdinalIgnoreCase){target.Image}
+                    :new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                var ids=new HashSet<uint>();
+                var processes=Snapshot(target.AppId!=null,argumentImages,ids);
+                associated=Associate(target,processes,ids,Array.Empty<(Launch,long)>());
+            }
+            foreach(var w in windows)
+            {
+                if(seenHandles.Contains(w.Handle))continue;
+                uint effectivePid=w.HostedProcessId!=0?w.HostedProcessId:w.ProcessId;
+                var info=Query(effectivePid);
+                if(info!=null&&associated.ContainsKey(info.Instance)&&seenHandles.Add(w.Handle))
+                    handles.Add(w.Handle);
+            }
+        }
+
+        return handles;
+    }
+
+    Dictionary<Instance,Association> Associate(Target target,List<ProcessInfo> processes,HashSet<uint> ids,IReadOnlyList<(Launch Launch,long Exited)> exitedLaunches)
+    {
+        var associated=new Dictionary<Instance,Association>();
+        var parents=new Dictionary<uint,Association>();
+        previous.TryGetValue(target,out var prior);
+        string[]? arguments=target.Arguments.Length==0?null:SplitArguments("app.exe "+target.Arguments);
+        string? appFolder=ApplicationFolder(target.Image);
+        var exitedParents=exitedLaunches.Where(l=>l.Launch.Target==target)
+            .ToLookup(l=>l.Launch.Instance.Id);
+        foreach(var p in processes)
+        {
+            bool main=target.AppId!=null
+                ?string.Equals(target.AppId,p.AppId,StringComparison.OrdinalIgnoreCase)
+                :string.Equals(target.Image,p.Path,StringComparison.OrdinalIgnoreCase)&&
+                    (target.Arguments.Length==0||arguments!=null&&p.Arguments!=null&&arguments.SequenceEqual(p.Arguments));
+
+            bool child=appFolder!=null&&p.Path.StartsWith(appFolder,StringComparison.OrdinalIgnoreCase)&&
+                (parents.TryGetValue(p.Parent,out var parent)&&parent.Process.Instance.Created<p.Instance.Created||
+                 prior!=null&&prior.TryGetValue(p.Instance,out var existing)&&!existing.Main||
+                 !ids.Contains(p.Parent)&&
+                    (exitedParents[p.Parent].Any(l=>l.Launch.Instance.Created<p.Instance.Created&&p.Instance.Created<=l.Exited)||
+                     prior!=null&&prior.Values.Any(a=>a.Process.Instance.Id==p.Parent&&a.Process.Instance.Created<p.Instance.Created)));
+            if(!main&&!child)continue;
+            var match=new Association(p,main&&!child);
+            associated[p.Instance]=match;
+            parents[p.Instance.Id]=match;
+        }
+        return associated;
+    }
+
+    static ProcessInfo? QueryProcess(uint pid,bool readAppId,string? argumentImage)
+    {
+        if(!ProcessIdToSessionId(pid,out uint session)||session!=Session)return null;
+        using var process=OpenProcess(0x1000,false,pid);
+        if(process.IsInvalid||!GetProcessTimes(process,out long created,out _,out _,out _)||
+            !GetExitCodeProcess(process,out uint status)||status!=259)return null;
+        var path=new StringBuilder(32768);
+        int size=path.Capacity;
+        if(!QueryFullProcessImageName(process,0,path,ref size))return null;
+        string image=path.ToString();
+        string? identity=null;
+        if(readAppId)
+        {
+            var appId=new StringBuilder(256);
+            size=appId.Capacity;
+            if(GetApplicationUserModelId(process,ref size,appId)==0)identity=appId.ToString();
+        }
+        string[]? args=argumentImage!=null&&string.Equals(argumentImage,image,StringComparison.OrdinalIgnoreCase)
+            ?ReadArguments(process):null;
+        return new(new(pid,created),0,image,identity,args);
     }
 
     static string? ApplicationFolder(string? executable)

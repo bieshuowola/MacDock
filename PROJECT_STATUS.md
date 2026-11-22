@@ -1,23 +1,20 @@
 # MacDock 状态快照
 
 ## 1. 当前基线状态
-- **版本与部署**：`v1.9.9.2`（本地构建 `Seq 639306903267803041`，指纹 `92b42b84c6194b618fe202ab3eaa5b69`，**未发远端**）；`release\MacDock\MacDock.exe` 已热重载运行中，用户真实配置与桌面文件未改动。
-- **最近修改文件**：`Genie.cs`、`Ui.cs`、`Icons.cs`、`DockWindow.cs`、`Program.cs`、`DrawerWindow.cs`、`DrawerScrollChecks.cs`（前序同期改动：`NativeContour.cs`、`HostGlass.cs`、`RestShadow.cs`、`ModalInputGate.cs`、`Theme.xaml`、`Dialogs.cs`、`SettingsReleaseChecks.cs`、`GenieBenchmarkChecks.cs`）。
+- **版本与部署**：`v1.9.9.3`（本机正式部署已更新，未发布 GitHub Release；构建 `Seq 639309497063631859`，指纹 `b969ac1e953c44d9b660d75722f2473f`）；本机 `release\MacDock\MacDock.exe` 已覆盖部署并单实例运行中，用户配置未改动（`entries=106, pinned=11, manual=1`）。
+- **最近修改文件**：`DrawerWindow.cs`、`DockWindow.cs`、`Native.cs`、`RunningApplications.cs`、`EntryMenu.cs`、`Program.cs`、`DrawerScrollChecks.cs`、`DrawerAndCloseChecks.cs`、`MacDock.csproj`。
 - **已验证成果（实测事实）**：
-  - 默认 `ps_2_0` Genie Shader 引擎：滚动位置闪跳已修复，顶/中/底/快速连续/隐藏 `Render()` 后重开第 1 帧偏移与纹理指纹 100% 一致，未暂停循环 `maxFrameMs` 为 `7.92–19.00 ms`（0 帧 >25ms）。
-  - 抽屉图标偶发空白与休眠恢复空白已修复：引入 `IconViewHost`（构造即订阅 `icon.Changed`/`Theme.Changed`）、`IconEntry.StagePending`/`ApplyPending`/`SeedFrom`、`EnsureIconLoadedNow`、`EnsureSurfaceLayout` 强制重排及 `OnSystemResume` 重建 GPU 纹理；实测 `--corner-test`（`MACDOCK_DRAWER_SCROLL_CHECK=1`、`MACDOCK_SCROLL_INTERACTION_CHECK=1`）全项通过：冷启动、连续 5x、长闲置、随机 4x 及 5x 休眠恢复均 `72/72` 就绪、`blankIcons=0`、`prebakedBlankTiles=0`、`unarrangedImages=0`；并修复 `Image.MeasureOverride` 冒泡 `DpiChanged` 触发 `PropagateResumeLayout` `FailFast`。
-  - 设置页对齐验收：`--settings-release-test` `41/41` 全过，`458`/`400` 宽度右边缘 0.00 DIP 对齐，说明文字无重叠挤压。
-- **待验证事项**：完整 `--genie-benchmark-test` 尚未在最新图标/滚动修复后重跑；远端发版/同步暂缓，待用户决定。
+  - **取消抽屉「手动添加 · 快捷入口」独立分组**：`DrawerWindow.Render()` 取消按 `Source == "manual"` 拆分，所有手动添加项目直接融入正常图标网格并参与「自定义 / 按类型 / 首字母」统一分组与拖拽排序（`SortTiles()`）；保留 `Source == "manual"` / `IsAlias` 数据语义以防桌面同步误删或删除原文件。
+  - **Dock / 抽屉右键菜单「关闭」**：新增 `Native.ApplicationWindows()`、`Native.PostCloseWindow`（`PostMessage(WM_CLOSE)`，兼容 UWP `ApplicationFrameWindow` 与隐藏 owner 窗口）、`RunningApplications.ClosableWindows()`、`Controller.CanCloseEntry` / `CloseEntry` 与 `DockWindow.RefreshRunningSoon()`；仅对存在可关闭窗口的运行中单个应用显示「关闭」，正常发送 `WM_CLOSE`，支持多窗口、已关闭竞态、固定/未固定项，不取消固定、不删文件、不误关其他程序。
+  - **实测通过**：`--self-test`（89/89）、`--drawer-close-test`（22/22 + 统一网格与右键菜单截图留证）、`--corner-test`（`MACDOCK_DRAWER_SCROLL_CHECK=1`，5/5 零回归）。
 
 ## 2. 隐性约束与排错黑名单
 - **废案黑名单**：
   - 禁 `ps_3_0` 着色器（黄屏）；`mac-gpu` 闲置 33.86ms 勿设默认；`Surface` 保持 `Visibility.Hidden` 防重烘焙。
-  - 禁在 `DpiChanged` 处理器中未校验 `ReferenceEquals(e.OriginalSource, this)` 直接同步 `Render()`（会因 `Image.MeasureOverride` 冒泡触发 WPF `FailFast`）。
-  - 禁仅靠 `Surface.IsArrangeValid` 判断是否 `UpdateLayout()`（固定宽高 `IconViewHost` 会截断冒泡导致子 `Image` `RenderSize=0x0`）。
-  - 禁仅靠 `Loaded` 订阅 `icon.Changed`（未 `Show()` 窗口 `IsLoaded=false` 会漏订）。
-- **操作红线**：禁触真实桌面与用户配置；GUI 启动/测试/热重载必须走 `schtasks /IT`（热重载脚本 `Reload-Dev.ps1`）；回滚入口 `backup\1992-genie-redesign-baseline\Rollback-1992.ps1`。
+  - 禁在 `DpiChanged` 处理器中未校验 `ReferenceEquals(e.OriginalSource, this)` 直接同步 `Render()`。
+  - 禁仅靠 `Surface.IsArrangeValid` 判断是否 `UpdateLayout()`；禁仅靠 `Loaded` 订阅 `icon.Changed`。
+- **操作红线**：禁触真实桌面与用户配置；GUI 启动/测试/热重载必须走 `schtasks /IT`（热重载脚本 `Reload-Dev.ps1`）；回滚入口 `backup\1993-predeploy-1992\`（`v1.9.9.2` 本地载荷，SHA256 已核验）及 `backup\1992-rev2-prepublish\`。
 
 ## 3. 遗留问题与焦点坐标
-- **遗留问题**：`wpfgfx` 首 2 帧 10–21ms（架构级需 DX11/DComp）；`--appearance-test` 滑块项未过。
-- **下一步任务**：按用户指令决定是否重跑 `--genie-benchmark-test`、推进远端双仓同步与 Release 签发，或继续处理遗留项。
-- **核心焦点文件**：`DrawerWindow.cs`、`Icons.cs`、`Genie.cs`、`Program.cs`、`Dialogs.cs`、`DrawerScrollChecks.cs`。
+- **遗留问题**：`wpfgfx` 首 2 帧 10–21ms（架构级需 DX11/DComp）；`--appearance-test` 滑块项未过；远端双仓与 `v1.9.9.3` Release 待用户确认后签发。
+- **核心焦点文件**：`DrawerWindow.cs`、`DockWindow.cs`、`EntryMenu.cs`、`RunningApplications.cs`、`Native.cs`、`Program.cs`、`DrawerAndCloseChecks.cs`。

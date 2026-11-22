@@ -184,8 +184,10 @@ internal static partial class Native
     [DllImport("user32.dll")] internal static extern nint GetForegroundWindow();
     [DllImport("user32.dll")] internal static extern bool GetWindowRect(nint hwnd,out Rect r);
     [DllImport("user32.dll")] internal static extern uint GetWindowThreadProcessId(nint hwnd,out uint pid);
+    [DllImport("user32.dll")] internal static extern bool IsWindow(nint hwnd);
     [DllImport("user32.dll")] internal static extern bool IsWindowVisible(nint hwnd);
     [DllImport("user32.dll")] internal static extern bool EnumWindows(EnumProc cb,nint param);
+    [DllImport("user32.dll")] static extern bool EnumChildWindows(nint parent,EnumProc cb,nint param);
     [DllImport("user32.dll",CharSet=CharSet.Unicode)] internal static extern int GetWindowText(nint hwnd,StringBuilder text,int max);
     [DllImport("user32.dll",CharSet=CharSet.Unicode)] internal static extern int GetClassName(nint hwnd,StringBuilder text,int max);
     [DllImport("user32.dll")] internal static extern bool SetForegroundWindow(nint hwnd);
@@ -197,6 +199,7 @@ internal static partial class Native
     [DllImport("user32.dll")] static extern bool ShowWindowAsync(nint hwnd,int command);
     [DllImport("user32.dll")] internal static extern bool PostMessage(nint hwnd,uint message,nint wParam,nint lParam);
     internal static void MinimizeWindow(nint hwnd)=>ShowWindowAsync(hwnd,6);
+    internal static bool PostCloseWindow(nint hwnd)=>hwnd!=0&&IsWindow(hwnd)&&PostMessage(hwnd,0x0010,0,0);
     [DllImport("dwmapi.dll")] static extern int DwmGetWindowAttribute(nint hwnd,int attribute,out int value,int size);
     [DllImport("user32.dll",EntryPoint="GetWindowLongPtrW")] internal static extern nint GetWindowLongPtr(nint hwnd,int index);
     [DllImport("user32.dll",EntryPoint="SetWindowLongPtrW")] internal static extern nint SetWindowLongPtr(nint hwnd,int index,nint value);
@@ -606,10 +609,13 @@ internal static partial class Native
             else siid=2;
         }
         else if(Directory.Exists(path))siid=3;
-        else if(File.Exists(path))
+        else if(!string.IsNullOrWhiteSpace(path))
         {
             var ext=Path.GetExtension(path).ToLowerInvariant();
-            siid=ext is ".exe" or ".lnk" or ".url" or ".appref-ms"?2u:0u;
+            if(File.Exists(path)||!string.IsNullOrEmpty(ext))
+                siid=ext is ".exe" or ".lnk" or ".url" or ".appref-ms"?2u:0u;
+            else
+                siid=3u;
         }
         if(siid==null)return null;
         foreach(uint id in siid==94?new[]{94u,15u}:new[]{siid.Value})
@@ -648,6 +654,34 @@ internal static partial class Native
         IsWindowVisible(window)&&(GetWindowLongPtr(window,-20).ToInt64()&0x80)==0&&
         (DwmGetWindowAttribute(window,14,out int cloaked,4)!=0||cloaked==0)&&
         Class(window) is not ("Progman" or "WorkerW" or "Shell_TrayWnd" or "Shell_SecondaryTrayWnd");
+
+    internal readonly record struct ApplicationWindow(nint Handle,uint ProcessId,uint HostedProcessId);
+
+    internal static List<ApplicationWindow> ApplicationWindows()
+    {
+        var list=new List<ApplicationWindow>();
+        uint self=(uint)Environment.ProcessId;
+        EnumWindows((window,_)=>{
+            if(!IsApplicationWindow(window))return true;
+            long ex=GetWindowLongPtr(window,-20).ToInt64();
+            nint owner=GetWindow(window,4);
+            if(owner!=0&&IsWindowVisible(owner)&&(ex&0x40000L)==0)return true;
+            GetWindowThreadProcessId(window,out uint pid);
+            if(pid==0||pid==self)return true;
+            uint hosted=0;
+            if(Class(window)=="ApplicationFrameWindow")
+            {
+                EnumChildWindows(window,(child,_)=>{
+                    GetWindowThreadProcessId(child,out uint childPid);
+                    if(childPid!=0&&childPid!=pid&&childPid!=self){hosted=childPid;return false;}
+                    return true;
+                },0);
+            }
+            list.Add(new(window,pid,hosted));
+            return true;
+        },0);
+        return list;
+    }
 
     internal static HashSet<uint> ApplicationWindowProcessIds()
     {

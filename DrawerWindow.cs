@@ -1416,7 +1416,8 @@ internal sealed class DrawerWindow : GlassWindow
     }
 
     // ---------------------------------------------------------------- rendering
-    internal IReadOnlyList<FrameworkElement> SortTiles(bool manual)=>visibleOrder.Where(e=>(e.Source=="manual")==manual).Where(e=>tiles.ContainsKey(e.Id)).Select(e=>(FrameworkElement)tiles[e.Id]).ToArray();
+    internal IReadOnlyList<FrameworkElement> SortTiles()=>visibleOrder.Where(e=>tiles.ContainsKey(e.Id)).Select(e=>(FrameworkElement)tiles[e.Id]).ToArray();
+    internal IReadOnlyList<FrameworkElement> SortTiles(bool manual)=>manual?Array.Empty<FrameworkElement>():SortTiles();
     internal void ApplyCustomOrder(string? movedId=null)
     {
         // Keep the same part of the list visible without following the moved tile.
@@ -1441,8 +1442,8 @@ internal sealed class DrawerWindow : GlassWindow
         else pendingAnchor=current;
         bool listView = owner.Store.Data.ListView;
         var entries = owner.Store.Data.Entries.Where(e => e.InDrawer && (q.Length == 0 || e.Name.Contains(q, StringComparison.CurrentCultureIgnoreCase) || e.Path.Contains(q, StringComparison.CurrentCultureIgnoreCase))).ToList();
-        var organized = Alphabet.Groups(entries.Where(e => e.Source != "manual"), owner.Store.Data.Mode).Select(g => (Key: "auto:" + g.Key, Title: g.Key, Items: g.ToArray()))
-            .Concat(Alphabet.Groups(entries.Where(e => e.Source == "manual"), owner.Store.Data.Mode).Select(g => (Key: "manual:" + g.Key, Title: "手动添加 · 快捷入口" + (g.Key.Length > 0 ? " · " + g.Key : ""), Items: g.ToArray())))
+        var organized = Alphabet.Groups(entries, owner.Store.Data.Mode)
+            .Select(g => (Key: "group:" + g.Key, Title: g.Key, Items: g.ToArray()))
             .ToList();
 
         var (tileW, gapX, gridW, chrome) = GridMetrics(l);
@@ -1694,6 +1695,7 @@ internal sealed class DrawerWindow : GlassWindow
     // Drop the tile visual tree while hidden; it is rebuilt from the icon cache on open.
     public void ResetSelection() => ClearSelection();
     internal int RenderedGroups => groups.Children.Count;
+    internal IReadOnlyList<string> RenderedGroupTitles => groups.Children.OfType<TextBlock>().Select(t => t.Text).ToArray();
     internal double SurfaceOpacity => ForegroundOpacity;
     internal double ScrollOffset => scroll.VerticalOffset;
     internal Border? TileControlForPath(string path) => tiles.Values.FirstOrDefault(t => t.Tag is Entry e && string.Equals(e.Path, path, StringComparison.OrdinalIgnoreCase));

@@ -224,6 +224,7 @@ internal sealed class DockWindow : GlassWindow
                 owner.SetPinned(new[]{pin},false);
                 SetKeyboardTile(index);break;
             case Key.F10 when Keyboard.Modifiers==ModifierKeys.Shift && !e.IsRepeat && keyboardTile?.ContextMenu is ContextMenu menu:
+                if(keyboardTile.Tag is Entry menuEntry)EntryMenu.Fill(menu,owner,new[]{menuEntry});
                 menu.PlacementTarget=keyboardTile;
                 menu.Placement=System.Windows.Controls.Primitives.PlacementMode.Bottom;
                 menu.IsOpen=true;break;
@@ -460,7 +461,7 @@ internal sealed class DockWindow : GlassWindow
         root.MouseLeftButtonUp += (_, a) => { bool moved = dragged || MovedPastThreshold(start, startScreen, a.GetPosition(root), owner.Scale); bool invoke = pressedHere && !moved && !owner.InternalDragging && PointerSort.Active == null && root.IsMouseOver; pressedHere = false; if (root.IsMouseCaptured) root.ReleaseMouseCapture(); if (invoke) ActivateTile(e,false); a.Handled = true; };
 
         var menu = new ContextMenu();
-        EntryMenu.Fill(menu, owner, new[] { e });
+        EntryMenu.Fill(menu, owner, new[] { e }, includeRunningActions: false);
         root.ContextMenuOpening += (_, _) => EntryMenu.Fill(menu, owner, new[] { e });
         TrackDockMenu(menu);
         root.ContextMenu = menu;
@@ -898,10 +899,31 @@ internal sealed class DockWindow : GlassWindow
     }
 
     internal bool DotVisible(string id)=>dots.TryGetValue(id,out var dot)&&dot.Opacity>0;
+    internal FrameworkElement? TileControlForId(string id)=>layout.FirstOrDefault(n=>n.Entry?.Id==id)?.Element;
 
-    public async void UpdateDots()
+    internal IReadOnlyList<nint> ClosableWindows(Entry entry)=>runningApplications.ClosableWindows(RunningApplications.Target.FromEntry(entry));
+
+    internal void RefreshRunningSoon()
     {
-        if(!IsVisible||checkingDots||Environment.TickCount64-dotsCheckedAt<300)return;
+        UpdateDots(force:true);
+        _ = RefreshRunningFollowUps();
+    }
+
+    async Task RefreshRunningFollowUps()
+    {
+        foreach(int delay in new[]{180,450,900})
+        {
+            await Task.Delay(delay);
+            if(!IsVisible)return;
+            UpdateDots(force:true);
+        }
+    }
+
+    public void UpdateDots()=>UpdateDots(false);
+
+    public async void UpdateDots(bool force)
+    {
+        if(!IsVisible||checkingDots||(!force&&Environment.TickCount64-dotsCheckedAt<300))return;
         checkingDots=true;
         dotsCheckedAt=Environment.TickCount64;
         try
@@ -1151,7 +1173,7 @@ internal sealed class DockWindow : GlassWindow
         root.MouseLeave += (_, _) => { if(inDrawer)owner.Drawer?.PaintTile(root);AnimateIcon(iconHost, 1); };
 
         Point start = default; Native.Point startScreen = default; bool dragged = false, pressedHere = false, selectionHandled = false;
-        if(inDrawer)PointerSort.Attach(root,owner.Drawer,()=>!owner.MenuOpen&&!owner.Busy&&!owner.InternalDragging,()=>owner.Drawer!.SortTiles(e.Source=="manual"),()=>owner.Drawer?.Scroller,(ids,id,index)=>owner.CommitSort(ids,id,index,false),active=>{if(active)ClearDoubleClickState();owner.InternalDragging=active;},()=>{if(Native.IsControlDown()||Native.IsShiftDown()){var ctrl=Native.IsControlDown();var shift=Native.IsShiftDown();ClearDoubleClickState();owner.Drawer?.FocusGrid();owner.Drawer?.ClickSelect(e,ctrl,shift);return;}ActivateTile(e,true);},()=>{owner.Drawer!.FocusGrid();if(owner.Drawer.IsSelected(e)!=true)owner.Drawer.ClickSelect(e,false,false);},external:()=>{ClearDoubleClickState();owner.InternalDragging=true;try{var data=ShellOps.DragData(e.Id,owner.DragPaths(e),false,"drawer",e.IsAlias);System.Windows.DragDrop.DoDragDrop(root,data,DragDropEffects.Copy|DragDropEffects.Link|(e.IsAlias?DragDropEffects.None:DragDropEffects.Move));}finally{owner.InternalDragging=false;owner.FinishDrag();}},reduced:()=>owner.Store.Data.ReducedMotion,prepare:()=>owner.SettleDrawerMotion(),owner:owner,sortAllowed:()=>owner.Store.Data.Mode=="自定义");
+        if(inDrawer)PointerSort.Attach(root,owner.Drawer,()=>!owner.MenuOpen&&!owner.Busy&&!owner.InternalDragging,()=>owner.Drawer!.SortTiles(),()=>owner.Drawer?.Scroller,(ids,id,index)=>owner.CommitSort(ids,id,index,false),active=>{if(active)ClearDoubleClickState();owner.InternalDragging=active;},()=>{if(Native.IsControlDown()||Native.IsShiftDown()){var ctrl=Native.IsControlDown();var shift=Native.IsShiftDown();ClearDoubleClickState();owner.Drawer?.FocusGrid();owner.Drawer?.ClickSelect(e,ctrl,shift);return;}ActivateTile(e,true);},()=>{owner.Drawer!.FocusGrid();if(owner.Drawer.IsSelected(e)!=true)owner.Drawer.ClickSelect(e,false,false);},external:()=>{ClearDoubleClickState();owner.InternalDragging=true;try{var data=ShellOps.DragData(e.Id,owner.DragPaths(e),false,"drawer",e.IsAlias);System.Windows.DragDrop.DoDragDrop(root,data,DragDropEffects.Copy|DragDropEffects.Link|(e.IsAlias?DragDropEffects.None:DragDropEffects.Move));}finally{owner.InternalDragging=false;owner.FinishDrag();}},reduced:()=>owner.Store.Data.ReducedMotion,prepare:()=>owner.SettleDrawerMotion(),owner:owner,sortAllowed:()=>owner.Store.Data.Mode=="自定义");
         root.PreviewMouseLeftButtonDown += (_, a) =>
         {
             if(owner.MenuOpen||owner.Busy)return;
@@ -1271,7 +1293,7 @@ internal sealed class DockWindow : GlassWindow
         {
             if (ReorderIntent(a,inDrawer,e))
             {
-                var scope=inDrawer?owner.Drawer!.SortTiles(e.Source=="manual").Select(x=>((Entry)x.Tag).Id).ToArray():owner.Store.PinnedEntries().Select(x=>x.Id).ToArray();owner.CommitSort(scope,(string)a.Data.GetData("MacDock.Entry"),Array.IndexOf(scope,e.Id),!inDrawer);a.Effects = ReorderEffect(a);
+                var scope=inDrawer?owner.Drawer!.SortTiles().Select(x=>((Entry)x.Tag).Id).ToArray():owner.Store.PinnedEntries().Select(x=>x.Id).ToArray();owner.CommitSort(scope,(string)a.Data.GetData("MacDock.Entry"),Array.IndexOf(scope,e.Id),!inDrawer);a.Effects = ReorderEffect(a);
                 a.Handled = true; return;
             }
             if(RejectTileDrop(a))return;

@@ -45,7 +45,7 @@ internal static class DrawerScrollChecks
         double viewBottom = viewTop + scroll.ViewportHeight;
         int visible = 0, rendered = 0, blank = 0;
 
-        foreach (var element in drawer.SortTiles(false).Concat(drawer.SortTiles(true)))
+        foreach (var element in drawer.SortTiles())
         {
             if (element is not Border tile || tile.Visibility != Visibility.Visible || tile.ActualWidth <= 0 || tile.ActualHeight <= 0)
                 continue;

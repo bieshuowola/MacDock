@@ -9,7 +9,7 @@ namespace MacDock;
 // (IFileOperation / OLE clipboard / property sheet); the full Explorer menu is one click away.
 internal static class EntryMenu
 {
-    public static void Fill(ContextMenu menu, Controller c, IReadOnlyList<Entry> entries)
+    public static void Fill(ContextMenu menu, Controller c, IReadOnlyList<Entry> entries, bool includeRunningActions = true)
     {
         menu.Items.Clear();
         if (entries.Count == 0) return;
@@ -67,6 +67,11 @@ internal static class EntryMenu
         Gap();
         var allPinned = entries.All(e => e.Pinned);
         Add(allPinned ? "从 Dock 取消固定" : "固定到 Dock", null, () => c.SetPinned(entries, !allPinned));
+        if (includeRunningActions && single != null && c.CanCloseEntry(single))
+        {
+            Gap();
+            Add("关闭", null, () => c.CloseEntry(single));
+        }
     }
 
     static Grid Header(string label, string? hint)

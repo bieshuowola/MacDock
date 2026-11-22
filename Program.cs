@@ -23,6 +23,7 @@ internal static class Program
         if(args.Length>1&&args[0]=="--maintenance-fixture")return FieldInteractionChecks.Fixture(args);
         if(args.Length==3&&args[0]=="--wake-input-fixture")return WakeBindingChecks.InputFixture(args[1],args[2]);
 #endif
+        if(args.Contains("--close-fixture"))return DrawerAndCloseChecks.Fixture(args);
         if(args.Contains("--game-fixture"))return GameWakeChecks.Fixture(args[Array.IndexOf(args,"--game-fixture")+1]);
         if(args.Contains("--external-fixture"))return ExternalGlassChecks.Fixture(args[Array.IndexOf(args,"--external-fixture")+1]);
         if(args.Contains("--modal-test"))return TransitionChecks.Logic();
@@ -77,7 +78,7 @@ internal static class Program
             try
             {
                 bool testing=args.Any(a=>a is "--proportion-test" or "--hover-drag-test" or "--display-check-test" or "--window-click-test" or "--gesture-test" or "--gateway-test" or "--interaction-test" or "--motion-perf-test" or "--contour-test" or "--render-input-test" or "--cross-pin-test" or "--stability-test" or "--corner-test" or "--wake-strip-test" or "--shadow-test" or "--brand-test" or "--game-wake-test" or "--genie-test" or "--dock-motion-test" or "--native17-test" or "--sorting-test" or "--menu-focus-test" or "--mirror-test" or "--external-glass" or "--resume-test" or "--gpu-host" or "--transition-test" or "--appearance-test" or "--ui-test" or "--visual-test" or "--file-test" or "--contrast" or "--native-menu" or "--quality-test" or "--material-test" or "--probe" or "--idle" or "--settings-shot" or "--automation-host" or "--responsive-test" or "--drag-test");
-                testing|=args.Contains("--first-run-test")||args.Contains("--settings-release-test");
+                testing|=args.Contains("--first-run-test")||args.Contains("--settings-release-test")||args.Contains("--drawer-close-test");
                 bool productPreview = false;
                 bool dragE2E = false;
                 bool externalDropPin = false;
@@ -108,11 +109,13 @@ internal static class Program
                     try{File.Delete(Path.Combine(testProfile,"last-session.json"));}catch{}
                 }
                 bool arrangementChecks=args.Contains("--cross-pin-test")||args.Contains("--sorting-test");
-                c=new Controller(testProfile,autoHide:testing,skipDesktop:productPreview||dragE2E||externalDropPin||drawerStability||dockStability||drawerPasteReuse||fieldInteraction||wakeBindingCheck||arrangementChecks);
+                bool drawerCloseChecks=args.Contains("--drawer-close-test");
+                c=new Controller(testProfile,autoHide:testing,skipDesktop:productPreview||dragE2E||externalDropPin||drawerStability||dockStability||drawerPasteReuse||fieldInteraction||wakeBindingCheck||arrangementChecks||drawerCloseChecks);
                 if(arrangementChecks)SortingChecks.UseFixtureDesktop(c,args.Contains("--verify-restart"));
                 c.RecordSession(args,testing);
                 if(args.Contains("--first-run-test"))app.Dispatcher.BeginInvoke(DispatcherPriority.Normal,()=>{_=FirstRunChecks.Run(c);});
                 if(args.Contains("--settings-release-test"))app.Dispatcher.BeginInvoke(DispatcherPriority.Normal,()=>{_=SettingsReleaseChecks.Run(c);});
+                if(drawerCloseChecks)app.Dispatcher.BeginInvoke(DispatcherPriority.Normal,()=>{_=DrawerAndCloseChecks.Run(c);});
 #if MACDOCK_EXPERIENCE_CHECKS
                 if(args.Contains("--genie-idle-check"))app.Dispatcher.BeginInvoke(DispatcherPriority.Normal,()=>{_=GenieIdleChecks.Run(c);});
                 if(args.Contains("--genie-benchmark-test"))app.Dispatcher.BeginInvoke(DispatcherPriority.Normal,()=>{_=GenieBenchmarkChecks.Run(c);});
@@ -1982,6 +1985,16 @@ internal sealed class Controller : IDisposable
     {
         foreach(var e in entries.Where(e=>e.IsAlias)) Store.Data.Entries.Remove(e);
         Changed();
+    }
+    internal bool CanCloseEntry(Entry e) => Dock.ClosableWindows(e).Count > 0;
+    internal bool CloseEntry(Entry e)
+    {
+        var windows = Dock.ClosableWindows(e);
+        bool sent = false;
+        foreach (var hwnd in windows)
+            sent |= Native.PostCloseWindow(hwnd);
+        Dock.RefreshRunningSoon();
+        return sent;
     }
 
     public void Rename(Entry e) => RenameEntry(e);
