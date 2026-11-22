@@ -235,12 +235,12 @@ internal sealed class DockWindow : GlassWindow
 
     void TrackDockMenu(ContextMenu menu)
     {
-        menu.Opened += (_, _) => { activeMenu = menu; owner.MenuOpen = true; };
+        menu.Opened += (_, _) => { activeMenu = menu; owner.NotifyWpfMenuOpened(menu); };
         menu.Closed += (_, _) =>
         {
             if (activeMenu != menu || menu.IsOpen) return;
             activeMenu = null;
-            owner.MenuOpen = false;
+            owner.NotifyWpfMenuClosed(menu);
             Native.RestoreSystemCursors();
         };
     }
@@ -1239,12 +1239,12 @@ internal sealed class DockWindow : GlassWindow
         var menu = new ContextMenu();
         menu.Opened += (_, _) =>
         {
-            owner.MenuOpen = true;
+            owner.NotifyWpfMenuOpened(menu);
             var entries = inDrawer ? owner.Drawer?.Selection ?? new[] { e } : new[] { e };
             if (entries.Count == 0) entries = new[] { e };
             EntryMenu.Fill(menu, owner, entries);
         };
-        menu.Closed += (_, _) => owner.MenuOpen = false;
+        menu.Closed += (_, _) => owner.NotifyWpfMenuClosed(menu);
         root.ContextMenu = menu;
         root.ContextMenuOpening+=(_,a)=>
         {

@@ -340,6 +340,7 @@ internal static class Dialogs
     {
         var w = WindowShell(title, 372, 176, true);
         if(c.Drawer is { IsVisible:true }) w.Owner=c.Drawer;
+        c.TrackOwnedWindow(w);
         var panel = new StackPanel { Margin = new Thickness(20, 18, 20, 18) };
         panel.Children.Add(Theme.Text(title, 15, false, FontWeights.SemiBold));
         var sub = Theme.Text(hint, 11, true); sub.Margin = new Thickness(0, 4, 0, 12);

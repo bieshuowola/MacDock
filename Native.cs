@@ -636,6 +636,56 @@ internal static partial class Native
         return null;
     }
     public static string Class(nint hwnd) { var s=new StringBuilder(256);GetClassName(hwnd,s,256);return s.ToString(); }
+    internal static string Title(nint hwnd) { var s=new StringBuilder(256);GetWindowText(hwnd,s,256);return s.ToString(); }
+    internal static bool IsImeClass(string cls)=>cls.StartsWith("Microsoft.IME.",StringComparison.Ordinal)||cls is "MSCTFIME UI" or "IME";
+    internal static bool IsShellDialogClass(nint hwnd)
+    {
+        if(hwnd==0||!IsWindow(hwnd)||!IsWindowVisible(hwnd))return false;
+        var root=GetAncestor(hwnd,2);
+        if(root==0)root=hwnd;
+        return Class(root) is "#32770" or "OperationStatusWindow";
+    }
+    internal static bool IsShellDialogCandidate(nint hwnd,bool includeOpenWith=false,bool allowInitializing=false)
+    {
+        if(hwnd==0||!IsWindow(hwnd))return false;
+        var root=GetAncestor(hwnd,2);
+        if(root==0)root=hwnd;
+        if(!allowInitializing)
+        {
+            if(!IsWindowVisible(root))return false;
+            if(DwmGetWindowAttribute(root,14,out int cloaked,4)==0&&cloaked!=0)return false;
+        }
+        var cls=Class(root);
+        if(cls is "#32770" or "OperationStatusWindow")return true;
+        if(includeOpenWith&&cls is "ApplicationFrameWindow" or "Windows.UI.Core.CoreWindow" or "WinUIDesktopWin32WindowClass" or "Xaml_WindowedPopupClass")
+        {
+            GetWindowThreadProcessId(root,out var pid);
+            if(pid!=0)
+            {
+                try
+                {
+                    using var p=Process.GetProcessById((int)pid);
+                    var name=p.ProcessName;
+                    if(name.Equals("OpenWith",StringComparison.OrdinalIgnoreCase)||
+                       name.Equals("ShellHost",StringComparison.OrdinalIgnoreCase)||
+                       name.Equals("rundll32",StringComparison.OrdinalIgnoreCase))
+                        return true;
+                }
+                catch { }
+            }
+        }
+        return false;
+    }
+    internal static List<nint> VisibleTopLevelWindows()
+    {
+        var list=new List<nint>();
+        EnumWindows((h,_)=>{
+            if(IsWindowVisible(h)&&(DwmGetWindowAttribute(h,14,out int cloaked,4)!=0||cloaked==0))
+                list.Add(h);
+            return true;
+        },0);
+        return list;
+    }
     public static List<(nint Handle,string Title)> Windows(string path)
     {
         var list = new List<(nint,string)>();

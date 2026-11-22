@@ -78,7 +78,7 @@ internal static class Program
             try
             {
                 bool testing=args.Any(a=>a is "--proportion-test" or "--hover-drag-test" or "--display-check-test" or "--window-click-test" or "--gesture-test" or "--gateway-test" or "--interaction-test" or "--motion-perf-test" or "--contour-test" or "--render-input-test" or "--cross-pin-test" or "--stability-test" or "--corner-test" or "--wake-strip-test" or "--shadow-test" or "--brand-test" or "--game-wake-test" or "--genie-test" or "--dock-motion-test" or "--native17-test" or "--sorting-test" or "--menu-focus-test" or "--mirror-test" or "--external-glass" or "--resume-test" or "--gpu-host" or "--transition-test" or "--appearance-test" or "--ui-test" or "--visual-test" or "--file-test" or "--contrast" or "--native-menu" or "--quality-test" or "--material-test" or "--probe" or "--idle" or "--settings-shot" or "--automation-host" or "--responsive-test" or "--drag-test");
-                testing|=args.Contains("--first-run-test")||args.Contains("--settings-release-test")||args.Contains("--drawer-close-test");
+                testing|=args.Contains("--first-run-test")||args.Contains("--settings-release-test")||args.Contains("--drawer-close-test")||args.Contains("--drawer-dismiss-test");
                 bool productPreview = false;
                 bool dragE2E = false;
                 bool externalDropPin = false;
@@ -110,12 +110,14 @@ internal static class Program
                 }
                 bool arrangementChecks=args.Contains("--cross-pin-test")||args.Contains("--sorting-test");
                 bool drawerCloseChecks=args.Contains("--drawer-close-test");
-                c=new Controller(testProfile,autoHide:testing,skipDesktop:productPreview||dragE2E||externalDropPin||drawerStability||dockStability||drawerPasteReuse||fieldInteraction||wakeBindingCheck||arrangementChecks||drawerCloseChecks);
+                bool drawerDismissChecks=args.Contains("--drawer-dismiss-test");
+                c=new Controller(testProfile,autoHide:testing,skipDesktop:productPreview||dragE2E||externalDropPin||drawerStability||dockStability||drawerPasteReuse||fieldInteraction||wakeBindingCheck||arrangementChecks||drawerCloseChecks||drawerDismissChecks);
                 if(arrangementChecks)SortingChecks.UseFixtureDesktop(c,args.Contains("--verify-restart"));
                 c.RecordSession(args,testing);
                 if(args.Contains("--first-run-test"))app.Dispatcher.BeginInvoke(DispatcherPriority.Normal,()=>{_=FirstRunChecks.Run(c);});
                 if(args.Contains("--settings-release-test"))app.Dispatcher.BeginInvoke(DispatcherPriority.Normal,()=>{_=SettingsReleaseChecks.Run(c);});
                 if(drawerCloseChecks)app.Dispatcher.BeginInvoke(DispatcherPriority.Normal,()=>{_=DrawerAndCloseChecks.Run(c);});
+                if(drawerDismissChecks)app.Dispatcher.BeginInvoke(DispatcherPriority.Normal,()=>{_=DrawerDismissChecks.Run(c);});
 #if MACDOCK_EXPERIENCE_CHECKS
                 if(args.Contains("--genie-idle-check"))app.Dispatcher.BeginInvoke(DispatcherPriority.Normal,()=>{_=GenieIdleChecks.Run(c);});
                 if(args.Contains("--genie-benchmark-test"))app.Dispatcher.BeginInvoke(DispatcherPriority.Normal,()=>{_=GenieBenchmarkChecks.Run(c);});
@@ -243,6 +245,21 @@ internal sealed class Controller : IDisposable
         return (allowed&requested)!=0?requested:DragDropEffects.None;
     }
     internal bool AutoHideBlocked => InternalDropProtected || ExternalFileDragActive || DrawerInteractionActive || (DrawerPinned && Drawer?.IsVisible == true);
+    readonly HashSet<nint> trackedContextWindows = new();
+    readonly HashSet<nint> elevatedContextWindows = new();
+    readonly HashSet<nint> openWithContextWindows = new();
+    readonly HashSet<nint> preCaptureDialogSnapshot = new();
+    readonly HashSet<nint> ownedContextWindows = new();
+    readonly DispatcherTimer shellCaptureTimer = new() { Interval = TimeSpan.FromMilliseconds(120) };
+    long shellCaptureUntilTick;
+    bool shellCaptureIncludeOpenWith;
+    bool pendingTrackedDialogRestore;
+    bool pendingRestoreFromOpenWith;
+    long suppressFocusLossUntilTick;
+    ContextMenu? activeWpfMenu;
+    long wpfMenuEpoch;
+    internal IReadOnlyCollection<nint> TrackedContextWindows => trackedContextWindows;
+    internal ModalInputGate.Regions? TestModalRegions => modal?.Current;
     int drawerInteractions;
     int drawerInteractionRevision;
     internal bool DrawerInteractionActive=>drawerInteractions>0;
@@ -298,6 +315,34 @@ internal sealed class Controller : IDisposable
     public bool MenuOpen { get=>menuOpen;set{menuOpen=value;InteractionChanged();} }
     public bool InternalDragging { get=>internalDragging;set{internalDragging=value;InteractionChanged();} }
     public bool Busy { get=>busy;set{busy=value;InteractionChanged();} }
+    internal void NotifyWpfMenuOpened(ContextMenu menu)
+    {
+        activeWpfMenu=menu;
+        wpfMenuEpoch++;
+        MenuOpen=true;
+    }
+    internal void NotifyWpfMenuClosed(ContextMenu menu)
+    {
+        if(ReferenceEquals(activeWpfMenu,menu))activeWpfMenu=null;
+        long closedEpoch=wpfMenuEpoch;
+        System.Windows.Application.Current?.Dispatcher.BeginInvoke(DispatcherPriority.Background,()=>
+        {
+            if(disposed||closedEpoch!=wpfMenuEpoch||nativeMenuTracking||activeWpfMenu!=null||menu.IsOpen)return;
+            MenuOpen=false;
+        });
+    }
+    internal void TrackOwnedWindow(Window window)
+    {
+        var handle=new WindowInteropHelper(window).EnsureHandle();
+        if(handle==0)return;
+        ownedContextWindows.Add(handle);
+        window.Closed+=(_,_)=>
+        {
+            ownedContextWindows.Remove(handle);
+            if(!disposed)UpdateModalRegions();
+        };
+        UpdateModalRegions();
+    }
     void InteractionChanged()
     {
         if(disposed)return;
@@ -311,6 +356,7 @@ internal sealed class Controller : IDisposable
         }
         if(desktopDirty){syncDebounce.Stop();syncDebounce.Start();}
         QueueDockLeaveCheck();
+        if(Drawer is { IsVisible: true }&&!drawerClosing)RequestDrawerFocusCheck();
     }
     readonly GlassWindow indicator;
     nint indicatorNative;
@@ -506,7 +552,27 @@ internal sealed class Controller : IDisposable
             else if(Environment.TickCount64-externalDragReleasedTick>=350)SetExternalFileDrag(false);
         };
         displayRetry.Tick+=(_,_)=>{displayRetry.Stop();RefreshDisplay();};
-        modal=new ModalInputGate(()=>System.Windows.Application.Current.Dispatcher.BeginInvoke(()=>{if(!AutoHideBlocked&&!Busy&&!InternalDragging)CloseDrawer(collapseDock:true);}),(int)Native.GetDoubleClickTime(),Native.DoubleClickWidth,Native.DoubleClickHeight,()=>System.Windows.Application.Current.Dispatcher.BeginInvoke(()=>{if(AutoHideBlocked||Busy||InternalDragging)return;drawerLostForeground=true;CloseDrawer(collapseDock:true);UpdateModalRegions();}));
+        shellCaptureTimer.Tick+=(_,_)=>OnShellCaptureTick();
+        modal=new ModalInputGate(
+            ()=>System.Windows.Application.Current.Dispatcher.BeginInvoke(()=>
+            {
+                GestureChecks.Trace?.Invoke("modal-dismiss",new{AutoHideBlocked,Busy,InternalDragging,MenuOpen,tracked=trackedContextWindows.Count,fg=(long)Native.GetForegroundWindow(),fgCls=Native.Class(Native.GetForegroundWindow())});
+                if(!AutoHideBlocked&&!Busy&&!InternalDragging)CloseDrawer(collapseDock:true);
+                if(!drawerClosing&&Drawer is {IsVisible:true})UpdateModalRegions();
+            }),
+            (int)Native.GetDoubleClickTime(),
+            Native.DoubleClickWidth,
+            Native.DoubleClickHeight,
+            ()=>System.Windows.Application.Current.Dispatcher.BeginInvoke(()=>
+            {
+                GestureChecks.Trace?.Invoke("modal-deactivate",new{AutoHideBlocked,Busy,InternalDragging,MenuOpen,tracked=trackedContextWindows.Count,fg=(long)Native.GetForegroundWindow(),fgCls=Native.Class(Native.GetForegroundWindow())});
+                if(!AutoHideBlocked&&!Busy&&!InternalDragging)
+                {
+                    CloseDrawer(collapseDock:true);
+                    if(drawerClosing||Drawer?.IsVisible!=true)drawerLostForeground=true;
+                }
+                UpdateModalRegions();
+            }));
         hook=new PointerHook(OnPointerEvent,FilterPointer,wakeShortcut,OnWakeKeyPressed);
         eventProc=(_,evt,h,obj,child,thread,time)=>
         {
@@ -1027,21 +1093,242 @@ internal sealed class Controller : IDisposable
         dockY=y;
         Native.DeferWindowPosAsync(Dock.Handle,Native.TopmostInsertAfter(Dock.Handle),dockRect.Left,y,0,0,0x0001);
     }
+    internal void SuppressFocusLoss(int durationMs)
+    {
+        long until=Environment.TickCount64+durationMs;
+        if(until>suppressFocusLossUntilTick)suppressFocusLossUntilTick=until;
+    }
+    internal void BeginShellWindowCapture(int durationMs=3000,bool includeOpenWith=false)
+    {
+        if(disposed||Drawer is not {IsVisible:true}||drawerClosing)return;
+        PruneTrackedContextWindows();
+        preCaptureDialogSnapshot.Clear();
+        foreach(var h in Native.VisibleTopLevelWindows())
+        {
+            if(!trackedContextWindows.Contains(h)&&Native.IsShellDialogCandidate(h,includeOpenWith))
+                preCaptureDialogSnapshot.Add(h);
+        }
+        shellCaptureIncludeOpenWith|=includeOpenWith;
+        long until=Environment.TickCount64+durationMs;
+        if(until>shellCaptureUntilTick)shellCaptureUntilTick=until;
+        if(!shellCaptureTimer.IsEnabled)shellCaptureTimer.Start();
+        GestureChecks.Trace?.Invoke("begin-shell-capture",new{durationMs,includeOpenWith,preSnapshot=preCaptureDialogSnapshot.Count});
+        UpdateModalRegions();
+    }
+    bool PruneTrackedContextWindows()
+    {
+        elevatedContextWindows.RemoveWhere(h=>h==0||!Native.IsWindow(h));
+        openWithContextWindows.RemoveWhere(h=>h==0||!Native.IsWindow(h));
+        if(trackedContextWindows.Count==0)return false;
+        int before=trackedContextWindows.Count;
+        bool hadOpenWith=trackedContextWindows.Any(h=>openWithContextWindows.Contains(h));
+        bool capturing=Environment.TickCount64<=shellCaptureUntilTick;
+        var fg=Native.GetForegroundWindow();
+        List<nint>? removedHidden=null;
+        trackedContextWindows.RemoveWhere(h=>
+        {
+            bool remove=h==0||!Native.IsWindow(h)||(!capturing&&!Native.IsWindowVisible(h)&&h!=fg);
+            if(remove&&h!=0&&Native.IsWindow(h)&&elevatedContextWindows.Contains(h))
+                (removedHidden??=new()).Add(h);
+            return remove;
+        });
+        if(removedHidden!=null)
+        {
+            foreach(var h in removedHidden)
+            {
+                elevatedContextWindows.Remove(h);
+                Native.SetWindowPos(h,new nint(-2),0,0,0,0,0x0013);
+            }
+        }
+        if(before>0&&trackedContextWindows.Count==0)
+        {
+            pendingTrackedDialogRestore=true;
+            pendingRestoreFromOpenWith=hadOpenWith;
+        }
+        return trackedContextWindows.Count!=before;
+    }
+    void TrackContextDialog(nint root)
+    {
+        trackedContextWindows.Add(root);
+        pendingTrackedDialogRestore=false;
+        pendingRestoreFromOpenWith=false;
+        if(!Native.IsShellDialogClass(root))openWithContextWindows.Add(root);
+        EnsureTrackedDialogZOrder(root);
+    }
+    bool TryFinishTrackedDialogRestore()
+    {
+        if(!pendingTrackedDialogRestore||trackedContextWindows.Count>0)return false;
+        bool fromOpenWith=pendingRestoreFromOpenWith;
+        pendingTrackedDialogRestore=false;
+        pendingRestoreFromOpenWith=false;
+        if(Drawer is not {IsVisible:true}||drawerClosing||MenuOpen||Busy||InternalDragging||AutoHideBlocked)return false;
+        var fg=Native.GetForegroundWindow();
+        if(fromOpenWith&&fg!=0&&!IsDesktopOrTaskbar(fg)&&!IsDrawerAssociatedWindow(fg))return false;
+        drawerInteractionRevision++;
+        if(!Drawer.IsActive)Drawer.Activate();
+        Drawer.FocusGrid();
+        var after=Native.GetForegroundWindow();
+        return after==0||IsDesktopOrTaskbar(after)||IsDrawerAssociatedWindow(after);
+    }
+    void EnsureTrackedDialogZOrder(nint hwnd)
+    {
+        if(hwnd==0||!Native.IsWindow(hwnd))return;
+        long ex=Native.GetWindowLongPtr(hwnd,-20).ToInt64();
+        bool topmost=(ex&0x8)!=0;
+        if(!topmost)elevatedContextWindows.Add(hwnd);
+        if(!Native.IsWindowVisible(hwnd))return;
+        bool occluded=!topmost
+            ||(Drawer is {IsVisible:true}&&Native.IsWindowAbove(Drawer.Handle,hwnd))
+            ||(Dock.IsVisible&&Native.IsWindowAbove(Dock.Handle,hwnd));
+        if(occluded)Native.SetWindowPos(hwnd,new nint(-1),0,0,0,0,0x0013);
+    }
+    bool TryCaptureShellDialogs()
+    {
+        if(Environment.TickCount64>shellCaptureUntilTick)
+        {
+            shellCaptureIncludeOpenWith=false;
+            return false;
+        }
+        bool added=false;
+        void CheckCandidate(nint candidate,bool allowInit)
+        {
+            if(candidate==0)return;
+            var root=Native.GetAncestor(candidate,2);
+            if(root==0)root=candidate;
+            if(trackedContextWindows.Contains(root)||preCaptureDialogSnapshot.Contains(root))return;
+            if(Drawer!=null&&root==Drawer.Handle)return;
+            if(root==Dock.Handle||root==indicatorNative)return;
+            if(Native.IsShellDialogCandidate(root,shellCaptureIncludeOpenWith,allowInit))
+            {
+                TrackContextDialog(root);
+                GestureChecks.Trace?.Invoke("capture-shell-dialog",new{hwnd=(long)root,cls=Native.Class(root),title=Native.Title(root)});
+                added=true;
+            }
+        }
+        CheckCandidate(Native.GetForegroundWindow(),true);
+        foreach(var h in Native.VisibleTopLevelWindows())CheckCandidate(h,false);
+        return added;
+    }
+    void ClearDrawerContextTracking()
+    {
+        foreach(var h in elevatedContextWindows)
+        {
+            if(h!=0&&Native.IsWindow(h))Native.SetWindowPos(h,new nint(-2),0,0,0,0,0x0013);
+        }
+        elevatedContextWindows.Clear();
+        openWithContextWindows.Clear();
+        trackedContextWindows.Clear();
+        preCaptureDialogSnapshot.Clear();
+        shellCaptureUntilTick=0;
+        shellCaptureIncludeOpenWith=false;
+        pendingTrackedDialogRestore=false;
+        pendingRestoreFromOpenWith=false;
+        suppressFocusLossUntilTick=0;
+        shellCaptureTimer.Stop();
+    }
+    static bool IsDesktopOrTaskbar(nint hwnd)=>
+        hwnd!=0&&Native.Class(hwnd) is "Progman" or "WorkerW" or "Shell_TrayWnd" or "Shell_SecondaryTrayWnd";
+    bool IsDrawerAssociatedWindow(nint hwnd)
+    {
+        if(hwnd==0)return false;
+        if(Drawer!=null&&(hwnd==Drawer.Handle||Native.GetAncestor(hwnd,2)==Drawer.Handle||Native.GetAncestor(hwnd,3)==Drawer.Handle))
+            return true;
+        if(hwnd==Dock.Handle||Native.GetAncestor(hwnd,2)==Dock.Handle||Native.GetAncestor(hwnd,3)==Dock.Handle)
+            return true;
+        if(IsSettingsWindow(hwnd))return true;
+        var root=Native.GetAncestor(hwnd,2);
+        if(root==0)root=hwnd;
+        var rootOwner=Native.GetAncestor(hwnd,3);
+        if(ownedContextWindows.Contains(root)||(rootOwner!=0&&ownedContextWindows.Contains(rootOwner)))
+            return true;
+        if(trackedContextWindows.Contains(root)||(rootOwner!=0&&trackedContextWindows.Contains(rootOwner)))
+            return true;
+        if(Environment.TickCount64<=shellCaptureUntilTick&&!preCaptureDialogSnapshot.Contains(root)&&
+            Native.IsShellDialogCandidate(root,shellCaptureIncludeOpenWith,allowInitializing:true))
+        {
+            TrackContextDialog(root);
+            return true;
+        }
+        if(Drawer?.TextInputActive==true&&Native.IsImeClass(Native.Class(hwnd)))
+            return true;
+        return false;
+    }
+    void OnShellCaptureTick()
+    {
+        if(disposed||Drawer is not {IsVisible:true}||drawerClosing)
+        {
+            shellCaptureTimer.Stop();
+            return;
+        }
+        bool added=TryCaptureShellDialogs();
+        bool removed=PruneTrackedContextWindows();
+        bool expired=modal?.Current?.ShellCapturePending==true&&Environment.TickCount64>shellCaptureUntilTick;
+        if(added||removed||expired)UpdateModalRegions();
+        if(trackedContextWindows.Count>0)
+        {
+            var fgNow=Native.GetForegroundWindow();
+            foreach(var h in trackedContextWindows)
+            {
+                if(h==fgNow||Native.GetAncestor(fgNow,3)==h||elevatedContextWindows.Contains(h)&&fgNow!=Drawer.Handle)
+                    EnsureTrackedDialogZOrder(h);
+            }
+        }
+        bool restored=TryFinishTrackedDialogRestore();
+        if(!restored&&!MenuOpen&&!Busy&&!InternalDragging&&!AutoHideBlocked&&Environment.TickCount64>=suppressFocusLossUntilTick)
+        {
+            var fg=Native.GetForegroundWindow();
+            if(fg!=0&&!IsDrawerAssociatedWindow(fg)){DrawerFocusChanged();return;}
+        }
+        if(trackedContextWindows.Count==0&&Environment.TickCount64>shellCaptureUntilTick)
+            shellCaptureTimer.Stop();
+    }
     internal void UpdateModalRegions()
     {
         if(modal==null)return;
-        modal.Current=!drawerLostForeground&&Drawer is {IsVisible:true}&&Drawer.Handle!=0
-            ?new ModalInputGate.Regions(Drawer.BodyBounds,dockRect,MenuOpen||Busy||InternalDragging||AutoHideBlocked,Drawer.Handle,Dock.Handle,Drawer.TextInputActive,drawerToken!=0&&!drawerClosing,Drawer.CurrentPose,Scale,!Drawer.AllowsTransparency,settingsHandle):null;
-        if(Drawer?.IsVisible!=true)modal.FinishDismissal();
+        nint[]? associated=null;
+        bool shellPending=false;
+        bool activeDrawer=!drawerLostForeground&&!drawerClosing&&Drawer is {IsVisible:true}&&Drawer.Handle!=0;
+        if(shellCaptureUntilTick!=0&&Environment.TickCount64>shellCaptureUntilTick)
+        {
+            shellCaptureUntilTick=0;
+            shellCaptureIncludeOpenWith=false;
+        }
+        if(activeDrawer)
+        {
+            PruneTrackedContextWindows();
+            var list=new List<nint>(trackedContextWindows.Count+ownedContextWindows.Count+1);
+            foreach(var h in trackedContextWindows)list.Add(h);
+            foreach(var h in ownedContextWindows)if(Native.IsWindow(h)&&Native.IsWindowVisible(h))list.Add(h);
+            if(settingsHandle!=0&&Native.IsWindow(settingsHandle))list.Add(settingsHandle);
+            if(list.Count>0)associated=list.ToArray();
+            shellPending=shellCaptureUntilTick!=0;
+        }
+        modal.Current=activeDrawer
+            ?new ModalInputGate.Regions(Drawer!.BodyBounds,dockRect,MenuOpen||Busy||InternalDragging||AutoHideBlocked,Drawer.Handle,Dock.Handle,Drawer.TextInputActive,drawerToken!=0&&!drawerClosing,Drawer.CurrentPose,Scale,!Drawer.AllowsTransparency,settingsHandle,associated,shellPending):null;
     }
     internal void DrawerFocusChanged()
     {
-        if(Drawer is not {IsVisible:true}||MenuOpen||Busy||InternalDragging||AutoHideBlocked)return;
+        if(Drawer is not {IsVisible:true}||drawerClosing)return;
+        bool captured=TryCaptureShellDialogs();
+        bool removedAny=PruneTrackedContextWindows();
+        bool expired=modal?.Current?.ShellCapturePending==true&&Environment.TickCount64>shellCaptureUntilTick;
+        if(captured||removedAny||expired)UpdateModalRegions();
+        if(TryFinishTrackedDialogRestore())return;
+        if(MenuOpen||Busy||InternalDragging||AutoHideBlocked||Environment.TickCount64<suppressFocusLossUntilTick)return;
         if((Native.GetAsyncKeyState(1)&0x8000)!=0)return; // external OLE source can own focus while the file is being dragged
         var foreground=Native.GetForegroundWindow();
-        if(foreground==0||foreground==Drawer.Handle||foreground==Dock.Handle||Native.GetAncestor(foreground,3)==Drawer.Handle||IsSettingsWindow(foreground))return;
-        drawerLostForeground=true;
+        if(foreground==0)return;
+        bool assoc=IsDrawerAssociatedWindow(foreground);
+        GestureChecks.Trace?.Invoke("focus-check",new{fg=(long)foreground,cls=Native.Class(foreground),title=Native.Title(foreground),assoc,tracked=trackedContextWindows.Count,owned=ownedContextWindows.Count,pending=Math.Max(0,shellCaptureUntilTick-Environment.TickCount64)});
+        if(assoc)
+        {
+            UpdateModalRegions();
+            return;
+        }
+        if(Environment.TickCount64<=shellCaptureUntilTick&&trackedContextWindows.Count==0&&!Native.IsWindowVisible(foreground))
+            return;
         CloseDrawer(collapseDock:true);
+        if(drawerClosing||Drawer?.IsVisible!=true)drawerLostForeground=true;
         UpdateModalRegions();
     }
     internal void RequestDrawerFocusCheck()
@@ -1086,6 +1373,8 @@ internal sealed class Controller : IDisposable
         if(message==0x201&&!dockShowing&&senseBox.Contains(p.X,p.Y)&&Native.IsWindowVisible(indicatorNative)&&Native.GetWindowRect(indicatorNative,out var bar)&&Math.Abs(p.X-(bar.Left+bar.Right)/2)<=48*Scale&&Math.Abs(p.Y-(bar.Top+bar.Bottom)/2)<=Math.Max(6*Scale,(bar.Bottom-bar.Top)/2.0)&&!Native.TaskbarPopupVisible())
         {modal.CaptureWake();System.Windows.Application.Current.Dispatcher.BeginInvoke(()=>{if(!Native.TaskbarPopupVisible(WorkArea))Expand();});return true;}
         bool consumed = modal.Filter(p,message,data);
+        if (message is 0x202 or 0x205 && region is { Suspended: false })
+            System.Windows.Application.Current.Dispatcher.BeginInvoke(DispatcherPriority.Background, RequestDrawerFocusCheck);
         if (message is 0x202 or 0x205 && dockShowing)
             System.Windows.Application.Current.Dispatcher.BeginInvoke(DispatcherPriority.Background, CheckDockLeave);
         if (message is 0x201 or 0x202)
@@ -1325,6 +1614,8 @@ internal sealed class Controller : IDisposable
         if(indicatorSuppressed)
         {
             DrawerPinned=false;Drawer?.UpdatePinVisual();
+            ClearDrawerContextTracking();
+            drawerLostForeground=false;
             if(Drawer!=null){drawerMotion.Cancel();drawerHideDeferred=false;drawerClosing=false;drawerToken=0;Drawer.Hide();Drawer.EndGenie();Drawer.ResetSelection();if(Drawer.Surface!=null)Drawer.Surface.Opacity=1;}
             Dock.SetGatewayRest(false);UpdateModalRegions();HideDockAnimated(true);ShowIndicator(false,true);intent.Reset();wake.Stop();
             EndAnimationBoost();
@@ -1463,7 +1754,7 @@ internal sealed class Controller : IDisposable
             return;
         }
         drawerHideDeferred = false;
-        drawerToken=0;drawerClosing=false;
+        drawerToken=0;drawerClosing=false;drawerLostForeground=false;
         if(open)
         {
             d.EndGenie();
@@ -1476,6 +1767,7 @@ internal sealed class Controller : IDisposable
         else
         {
             GestureChecks.Trace?.Invoke("drawer-hide", null);
+            ClearDrawerContextTracking();
             d.Hide();
             if (retainedDockArea != null && Dock.IsVisible && !dockHiding && !MenuOpen)
                 MoveDock(dockRect.Top);
@@ -1512,12 +1804,13 @@ internal sealed class Controller : IDisposable
         if(Drawer is not {IsVisible:true} d)return;
         if(!d.IsDeforming&&!drawerMotion.Running)return;
         T("settle-drawer:"+caller+";p="+drawerMotion.Value.ToString("F3"));
-        drawerMotion.Snap(1);drawerToken=0;drawerClosing=false;d.EndGenie();d.SetSurfaceOpacity(1);UpdateModalRegions();EndAnimationBoost();
+        drawerMotion.Snap(1);drawerToken=0;drawerClosing=false;drawerLostForeground=false;drawerHideDeferred=false;d.EndGenie();d.SetSurfaceOpacity(1);UpdateModalRegions();EndAnimationBoost();
     }
     public void CloseDrawer(bool keepDock=false,bool collapseDock=false,bool force=false)
     {
         if(InternalDropProtected||DrawerInteractionActive)return;
         if(!force && AutoHideBlocked)return;
+        GestureChecks.Trace?.Invoke("close-drawer",new{keepDock,collapseDock,force,MenuOpen,tracked=trackedContextWindows.Count,fg=(long)Native.GetForegroundWindow(),fgCls=Native.Class(Native.GetForegroundWindow())});
         if(DrawerPinned)
         {
             DrawerPinned=false;
@@ -1529,7 +1822,9 @@ internal sealed class Controller : IDisposable
         d.FinishScrollForClose();
         if(keepDock&&Native.GetWindowRect(d.Handle,out var previousDrawer))retainedDockArea=new Native.Rect{Left=Math.Min(previousDrawer.Left,dockRect.Left),Right=Math.Max(previousDrawer.Right,dockRect.Right),Top=previousDrawer.Top,Bottom=dockRect.Bottom};
         else retainedDockArea=null;
+        ClearDrawerContextTracking();
         drawerClosing=true;drawerToken=++drawerEpoch;
+        UpdateModalRegions();
         if(Store.Data.ReducedMotion||!Anim.Allowed){drawerMotion.Cancel();CompleteDrawerMotion(false);return;}
         if(!d.IsDeforming){var r=DrawerRect();var gateway=Dock.GatewayCenter;drawerAnchorX=(gateway.X-r.Left)/Scale-d.MaterialInset;drawerAnchorY=(gateway.Y-r.Top)/Scale-d.MaterialInset;d.SetGenie(drawerMotion.Value,drawerAnchorX,drawerAnchorY);MoveDock(dockRect.Top);}
         BeginAnimationBoost();
@@ -1583,15 +1878,29 @@ internal sealed class Controller : IDisposable
     public void AddFiles(string[] paths,bool pin) { Safe(()=> { foreach(var p in paths)Store.Add(p,pin,source:Desktop.IsDesktopPath(p)?"desktop":"manual");Changed(); }); }
     public void PickFiles(bool pin)
     {
+        bool fromDrawer=Drawer is {IsVisible:true};
+        using var interaction=HoldDrawerInteraction();
         Busy=true;
-        try { var d=new Microsoft.Win32.OpenFileDialog { Multiselect=true,Title="添加入口 · 原文件保持原位",Filter="所有文件|*.*" };if(d.ShowDialog()==true)AddFiles(d.FileNames,pin); }
-        finally { Busy=false; }
+        try
+        {
+            var d=new Microsoft.Win32.OpenFileDialog { Multiselect=true,Title="添加入口 · 原文件保持原位",Filter="所有文件|*.*" };
+            bool? ok=fromDrawer?d.ShowDialog(Drawer):d.ShowDialog();
+            if(ok==true)AddFiles(d.FileNames,pin);
+        }
+        finally { Busy=false;RestoreDrawerAfterShell(fromDrawer); }
     }
     public void PickFolder(bool pin)
     {
+        bool fromDrawer=Drawer is {IsVisible:true};
+        using var interaction=HoldDrawerInteraction();
         Busy=true;
-        try { var d=new Microsoft.Win32.OpenFolderDialog { Title="添加文件夹入口" };if(d.ShowDialog()==true)AddFiles(new[]{d.FolderName},pin); }
-        finally { Busy=false; }
+        try
+        {
+            var d=new Microsoft.Win32.OpenFolderDialog { Title="添加文件夹入口" };
+            bool? ok=fromDrawer?d.ShowDialog(Drawer):d.ShowDialog();
+            if(ok==true)AddFiles(new[]{d.FolderName},pin);
+        }
+        finally { Busy=false;RestoreDrawerAfterShell(fromDrawer); }
     }
     // ---------------------------------------------------------------- real file operations
     // Every command below runs through the Windows shell, so prompts, conflicts, recycle bin,
@@ -1784,11 +2093,17 @@ internal sealed class Controller : IDisposable
         if(entries.Count==0) return;
         Safe(()=> { foreach(var e in entries) Dock.TrackLaunch(e,Shell.Launch(e)); CloseDrawer(force:true); });
     }
-    internal void OpenWithEntry(Entry e) => Safe(()=> { if(!ShellOps.OpenWith(e.Path)) Notify("没有可用于打开方式的项目。"); });
+    internal void OpenWithEntry(Entry e) => Safe(()=>
+    {
+        BeginShellWindowCapture(3000,includeOpenWith:true);
+        if(!ShellOps.OpenWith(e.Path)) Notify("没有可用于打开方式的项目。");
+        else TryCaptureShellDialogs();
+    });
     internal void RevealEntry(Entry e) => Safe(()=>
     {
         if(e.IsVirtual) Process.Start(new ProcessStartInfo(e.ShellVerb??"shell:Desktop") { UseShellExecute=true });
         else Process.Start(new ProcessStartInfo("explorer.exe",$"/select,\"{e.Path}\"") { UseShellExecute=true });
+        CloseDrawer(force:false);
     });
 
     internal void CopyEntries(IReadOnlyList<Entry> entries,bool move)
@@ -1845,11 +2160,12 @@ internal sealed class Controller : IDisposable
 
     void RestoreDrawerAfterShell(bool fromDrawer)
     {
-        if(!fromDrawer||Drawer is not {IsVisible:true} drawer)return;
+        if(!fromDrawer||Drawer is not {IsVisible:true} drawer||drawerClosing)return;
         var foreground=Native.GetForegroundWindow();
-        // Explorer can leave its progress HWND active briefly after PerformOperations returns.
-        // Keep the drawer's keyboard focus only when this operation still owns the foreground.
-        if(Native.Class(foreground)=="OperationStatusWindow")drawer.Activate();
+        if(foreground==0||Native.Class(foreground)=="OperationStatusWindow"||IsDesktopOrTaskbar(foreground)||IsDrawerAssociatedWindow(foreground))
+        {
+            if(!drawer.IsActive)drawer.Activate();
+        }
         if(drawer.IsActive)drawer.FocusGrid();
     }
 
@@ -1903,10 +2219,14 @@ internal sealed class Controller : IDisposable
     {
         var paths=RealPaths(entries);
         if(paths.Length==0) return;
+        BeginShellWindowCapture(3000);
         using var interaction=HoldDrawerInteraction();
-        bool fromDrawer=Drawer?.IsActive==true;
-        try { if(!ShellOps.Properties(DialogOwner,paths)) Notify("无法打开属性。",false); }
-        finally { RestoreDrawerAfterShell(fromDrawer); }
+        try
+        {
+            if(!ShellOps.Properties(DialogOwner,paths)) Notify("无法打开属性。",false);
+            else TryCaptureShellDialogs();
+        }
+        finally { UpdateModalRegions(); }
     }
 
     internal void CompressEntries(IReadOnlyList<Entry> entries)
@@ -1938,23 +2258,49 @@ internal sealed class Controller : IDisposable
         finally { Mouse.OverrideCursor=previous;Busy=false; }
     }
 
+    static bool IsShellLaunchVerb(string? verb) =>
+        !string.IsNullOrWhiteSpace(verb)&&
+        verb.Trim().ToLowerInvariant() is "open" or "opennew" or "opennewprocess" or "openinnewtab" or "runas" or "runasuser" or "explore";
+
     internal void ShowNativeMenu(IReadOnlyList<Entry> entries,Native.Point? position=null)
     {
         if(entries.Count==0) return;
-        using var interaction=HoldDrawerInteraction();
-        InteractionChecks.Record?.Invoke("shell-start",null);MenuOpen=true;BeginNativeMenu();
-        try
+        bool closeAfterMenu=false;
+        bool renameAfterMenu=false;
+        if(activeWpfMenu is {IsOpen:true} wpfMenu)wpfMenu.IsOpen=false;
+        using(var interaction=HoldDrawerInteraction())
         {
-            var p=position.GetValueOrDefault();if(position==null)Native.GetCursorPos(out p);
-            var real=RealPaths(entries);InteractionChecks.Record?.Invoke("shell-real-paths",null);
-            bool pinned=entries.All(e=>e.Pinned);Action pin=()=>SetPinned(entries,!pinned);
-            var ok=real.Length==1?ShellMenu.ShowItem(DialogOwner,real[0],p.X,p.Y,()=>RenameEntry(entries[0]),pin,pinned):real.Length>1?ShellMenu.Show(DialogOwner,real,p.X,p.Y,pin:pin,pinned:pinned)
-                :entries.Count==1&&entries[0].IsVirtual?ShellMenu.ShowItem(DialogOwner,entries[0].Path,p.X,p.Y,pin:pin,pinned:pinned)
-                :false;
-            if(!ok) Notify("无法打开 Windows 菜单：所选项目跨多个文件夹或不可用。",false);
-            if (ok && ShellMenu.LastCommand > 0) ScheduleSync();
+            InteractionChecks.Record?.Invoke("shell-start",null);MenuOpen=true;BeginNativeMenu();
+            ShellMenu.BeforeInvokeCommand=(verb,_)=>
+            {
+                if(IsShellLaunchVerb(verb))return;
+                BeginShellWindowCapture(3200,includeOpenWith:string.Equals(verb,"openas",StringComparison.OrdinalIgnoreCase));
+            };
+            try
+            {
+                var p=position.GetValueOrDefault();if(position==null)Native.GetCursorPos(out p);
+                var real=RealPaths(entries);InteractionChecks.Record?.Invoke("shell-real-paths",null);
+                bool pinned=entries.All(e=>e.Pinned);Action pin=()=>SetPinned(entries,!pinned);
+                var ok=real.Length==1?ShellMenu.ShowItem(DialogOwner,real[0],p.X,p.Y,()=>renameAfterMenu=true,pin,pinned):real.Length>1?ShellMenu.Show(DialogOwner,real,p.X,p.Y,pin:pin,pinned:pinned)
+                    :entries.Count==1&&entries[0].IsVirtual?ShellMenu.ShowItem(DialogOwner,entries[0].Path,p.X,p.Y,pin:pin,pinned:pinned)
+                    :false;
+                if(!ok) Notify("无法打开 Windows 菜单：所选项目跨多个文件夹或不可用。",false);
+                if(ok&&ShellMenu.LastCommand>0)
+                {
+                    if(IsShellLaunchVerb(ShellMenu.LastVerb))closeAfterMenu=true;
+                    else ScheduleSync();
+                }
+            }
+            finally { ShellMenu.BeforeInvokeCommand=null;EndNativeMenu();MenuOpen=false; }
         }
-        finally { EndNativeMenu();MenuOpen=false; }
+        if(renameAfterMenu)RenameEntry(entries[0]);
+        else if(closeAfterMenu)CloseDrawer(force:false);
+        else if(Drawer is {IsVisible:true}&&!drawerClosing)
+        {
+            TryCaptureShellDialogs();
+            UpdateModalRegions();
+            RequestDrawerFocusCheck();
+        }
     }
 
     bool nativeMenuTracking,nativeMenuPositionPending;
@@ -1967,7 +2313,34 @@ internal sealed class Controller : IDisposable
         Mouse.OverrideCursor=Cursors.Arrow;Native.SetArrowCursor();
     }
     void EndNativeMenu(){nativeMenuTracking=false;Dock.MenuTracking=false;if(Drawer!=null)Drawer.MenuTracking=false;Mouse.OverrideCursor=null;Dock.RefreshMaterial();Drawer?.RefreshMaterial();if(nativeMenuPositionPending){nativeMenuPositionPending=false;Position();}}
-    internal void ShowDesktopBackground(){using var interaction=HoldDrawerInteraction();MenuOpen=true;BeginNativeMenu();try{Native.GetCursorPos(out var p);if(!ShellMenu.ShowBackground(DialogOwner,p.X,p.Y,PasteToDesktop,CanPaste,RefreshDesktop))Notify("Windows 桌面菜单暂不可用。");ScheduleSync();}finally{EndNativeMenu();MenuOpen=false;}}
+    internal void ShowDesktopBackground()
+    {
+        if(disposed){MenuOpen=false;return;}
+        bool closeAfterMenu=false;
+        using(var interaction=HoldDrawerInteraction())
+        {
+            MenuOpen=true;BeginNativeMenu();
+            ShellMenu.BeforeInvokeCommand=(verb,_)=>
+            {
+                if(!IsShellLaunchVerb(verb))BeginShellWindowCapture(3000);
+            };
+            try
+            {
+                Native.GetCursorPos(out var p);
+                if(!ShellMenu.ShowBackground(DialogOwner,p.X,p.Y,PasteToDesktop,CanPaste,RefreshDesktop))Notify("Windows 桌面菜单暂不可用。");
+                else if(ShellMenu.LastCommand>0&&IsShellLaunchVerb(ShellMenu.LastVerb))closeAfterMenu=true;
+                ScheduleSync();
+            }
+            finally{ShellMenu.BeforeInvokeCommand=null;EndNativeMenu();MenuOpen=false;}
+        }
+        if(closeAfterMenu)CloseDrawer(force:false);
+        else if(Drawer is {IsVisible:true}&&!drawerClosing)
+        {
+            TryCaptureShellDialogs();
+            UpdateModalRegions();
+            RequestDrawerFocusCheck();
+        }
+    }
     internal void SetPinned(IReadOnlyList<Entry> entries,bool pinned)
     {
         if(!PersistArrangement(()=>{foreach(var e in entries)e.Pinned=pinned;}))return;
@@ -1990,10 +2363,17 @@ internal sealed class Controller : IDisposable
     internal bool CloseEntry(Entry e)
     {
         var windows = Dock.ClosableWindows(e);
+        if(windows.Count==0)return false;
+        if(Drawer is {IsVisible:true}&&!drawerClosing)SuppressFocusLoss(450);
         bool sent = false;
         foreach (var hwnd in windows)
             sent |= Native.PostCloseWindow(hwnd);
         Dock.RefreshRunningSoon();
+        if(sent&&Drawer is {IsVisible:true} drawer&&!drawerClosing)
+        {
+            if(!drawer.IsActive)drawer.Activate();
+            drawer.FocusGrid();
+        }
         return sent;
     }
 
@@ -2052,8 +2432,8 @@ internal sealed class Controller : IDisposable
         menu.PlacementTarget=Dock;menu.Placement=System.Windows.Controls.Primitives.PlacementMode.AbsolutePoint;
         Native.GetCursorPos(out var p);var dpi=System.Windows.Media.VisualTreeHelper.GetDpi(Dock);
         menu.HorizontalOffset=p.X/dpi.DpiScaleX;menu.VerticalOffset=p.Y/dpi.DpiScaleY;
-        menu.Opened+=(_,_)=> { MenuOpen=true;Dock.ObservePointer(p,false);if(PresentationSource.FromVisual(menu) is HwndSource source)Native.SetForegroundWindow(source.Handle);menu.Focus(); };
-        menu.Closed+=(_,_)=> { MenuOpen=false; };
+        menu.Opened+=(_,_)=> { NotifyWpfMenuOpened(menu);Dock.ObservePointer(p,false);if(PresentationSource.FromVisual(menu) is HwndSource source)Native.SetForegroundWindow(source.Handle);menu.Focus(); };
+        menu.Closed+=(_,_)=> { NotifyWpfMenuClosed(menu); };
         trayMenu=menu;menu.IsOpen=true;
     }
     const string RunKey="Software\\Microsoft\\Windows\\CurrentVersion\\Run";
@@ -2148,6 +2528,7 @@ internal sealed class Controller : IDisposable
         if(updateWindow is {IsVisible:true} open){open.Activate();return;}
         updateWindow=Dialogs.Update(this,anchor);
         updateWindow.Closed+=(_,_)=>updateWindow=null;
+        TrackOwnedWindow(updateWindow);
         updateWindow.Show();
         updateWindow.Activate();
     }
@@ -2469,7 +2850,7 @@ internal sealed class Controller : IDisposable
     {
         void Trace(string value){if(Environment.GetEnvironmentVariable("MACDOCK_TEST_RESULTS") is string folder)File.AppendAllText(Path.Combine(folder,"dispose-stages.txt"),value+Environment.NewLine);}
         Trace("begin");
-        if(disposed)return;disposed=true;Native.RestoreSystemCursors(force:true);updateCheck.Stop();updateLifetime.Cancel();updateLifetime.Dispose();dockMotion.Cancel();drawerMotion.Cancel();EndAnimationBoost(force:true);PointerSort.Active?.End(false);if(trayMenu!=null)trayMenu.IsOpen=false;wake.Stop();leave.Stop();refresh.Stop();syncDebounce.Stop();safetySync.Stop();displayRetry.Stop();iconRefreshDebounce.Stop();iconGlobalDebounce.Stop();iconReconcileTimer.Stop();foreach(var t in iconRetryTimers.ToArray())t.Stop();iconRetryTimers.Clear();
+        if(disposed)return;disposed=true;Native.RestoreSystemCursors(force:true);updateCheck.Stop();updateLifetime.Cancel();updateLifetime.Dispose();dockMotion.Cancel();drawerMotion.Cancel();EndAnimationBoost(force:true);PointerSort.Active?.End(false);if(trayMenu!=null)trayMenu.IsOpen=false;wake.Stop();leave.Stop();refresh.Stop();syncDebounce.Stop();safetySync.Stop();displayRetry.Stop();iconRefreshDebounce.Stop();iconGlobalDebounce.Stop();iconReconcileTimer.Stop();ClearDrawerContextTracking();ownedContextWindows.Clear();foreach(var t in iconRetryTimers.ToArray())t.Stop();iconRetryTimers.Clear();
         foreach(var w in watchers) { try { w.EnableRaisingEvents=false;w.Dispose(); } catch { } }
         SystemEvents.DisplaySettingsChanged-=DisplayChanged;SystemEvents.UserPreferenceChanged-=PreferenceChanged;SystemEvents.PowerModeChanged-=PowerChanged;
         hook?.Dispose();shellChanges?.Dispose();foreach(var h in eventHooks)Native.UnhookWinEvent(h);

@@ -43,6 +43,8 @@ internal static class TransitionChecks
             Check("ordinary click elsewhere is not mistaken for double click",!gate.Filter(new(30,30),0x204,now:720));
             gate.Current=area with{Suspended=true};Check("file dialog or Shell menu suspends modality",!gate.Filter(p,0x201,now:1300));
             gate.Current=area;Check("X button dismissal preserves the pair",gate.Filter(p,0x20B,0x10000,2000)&&gate.Filter(p,0x20C,0x10000,2010));
+            var assocArea=area with{AssociatedWindows=new nint[]{12345}};
+            Check("associated context window handle is recognized",ModalInputGate.IsAssociatedWindow(12345,assocArea)&&!ModalInputGate.IsAssociatedWindow(99999,assocArea)&&!ModalInputGate.IsAssociatedWindow(0,assocArea));
             var spring=Enumerable.Range(0,1001).Select(n=>Anim.DrawerSpring(n/1000.0)).ToArray();Check("spring starts and ends exactly at stable geometry",spring[0]==0&&spring[^1]==1);Check("spring overshoot is subtle and bounded",spring.Max()>1&&spring.Max()<1.06&&spring.Min()>=0,$"peak={spring.Max():F5}");
             Check("suppress wake key active on clean desktop",Controller.ShouldSuppressDockByKey(true,false,false,false,false));
             Check("wake suppression respects dialogs, menus, drag and drawer",!Controller.ShouldSuppressDockByKey(false,false,false,false,false)&&!Controller.ShouldSuppressDockByKey(true,true,false,false,false)&&!Controller.ShouldSuppressDockByKey(true,false,true,false,false)&&!Controller.ShouldSuppressDockByKey(true,false,false,true,false)&&!Controller.ShouldSuppressDockByKey(true,false,false,false,true));
@@ -102,7 +104,14 @@ internal static class TransitionChecks
             c.ToggleDrawer();await Task.Delay(100);Native.ActivateWindow(new System.Windows.Interop.WindowInteropHelper(sentinel).Handle);await Task.Delay(430);Check("foreground window switch closes drawer automatically",!c.Drawer.IsVisible&&!c.Dock.IsVisible);
             for(int i=0;i<15;i++){c.ToggleDrawer();await Task.Delay(42+i%3*15);c.CloseDrawer(keepDock:true);await Task.Delay(36+i%4*9);}
             c.ToggleDrawer();await Task.Delay(380);Check("rapid open-close-reverse cycles recover",c.Drawer.IsVisible&&c.Drawer.EntranceScale==1&&c.Drawer.ForegroundOpacity==1&&Anim.ActiveTimers==0);
-            c.CloseDrawer();await Task.Delay(220);c.Store.Data.ReducedMotion=true;c.ToggleDrawer();await Task.Delay(40);Check("reduced motion bypasses spring",c.Drawer.IsVisible&&c.Drawer.EntranceScale==1&&Anim.ActiveTimers==0,"timers="+Anim.ActiveTimers);c.CloseDrawer(keepDock:true);Check("reduced motion closes synchronously",!c.Drawer.IsVisible&&c.Dock.IsVisible);c.Store.Data.ReducedMotion=false;
+            c.CloseDrawer();await Task.Delay(220);c.Store.Data.ReducedMotion=true;c.ToggleDrawer();await Task.Delay(40);Check("reduced motion bypasses spring",c.Drawer.IsVisible&&c.Drawer.EntranceScale==1&&Anim.ActiveTimers==0,"timers="+Anim.ActiveTimers);
+            Native.MovePointer(outside.X,outside.Y);await Task.Delay(25);
+            int rmDownBefore=downs,rmUpBefore=ups;
+            await Task.Run(()=>{Native.TestButton(true);Thread.Sleep(25);Native.TestButton(false);Thread.Sleep(45);Native.TestButton(true);Thread.Sleep(25);Native.TestButton(false);});await Task.Delay(120);
+            Check("reduced motion double click never passes through",!c.Drawer.IsVisible&&!c.Dock.IsVisible&&downs==rmDownBefore&&ups==rmUpBefore,$"downs={downs-rmDownBefore}; ups={ups-rmUpBefore}");
+            await Task.Delay(520);Native.TestButton(true);await Task.Delay(25);Native.TestButton(false);await Task.Delay(60);
+            Check("reduced motion restores normal clicks after double-click window",downs==rmDownBefore+1&&ups==rmUpBefore+1);
+            c.Expand();c.ToggleDrawer();await Task.Delay(40);c.CloseDrawer(keepDock:true);Check("reduced motion closes synchronously",!c.Drawer.IsVisible&&c.Dock.IsVisible);c.Store.Data.ReducedMotion=false;
             Check("no physical input interference",PointerHook.NonInjectedInputs==0);
         }
         catch(Exception e){results.Add(new{name="error",pass=false,detail=e.ToString()});}

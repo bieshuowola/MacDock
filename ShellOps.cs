@@ -206,7 +206,13 @@ internal static class ShellOps
             try { Marshal.WriteInt32(effectMemory, move ? 2 : 1); effectHandle = Alloc(effectMemory, 4); }
             finally { Marshal.FreeHGlobal(effectMemory); }
             if (dropHandle == 0 || effectHandle == 0) return false;
-            if (!OpenClipboard(0)) return false;
+            bool opened = false;
+            for (int attempt = 0; attempt < 10; attempt++)
+            {
+                if (OpenClipboard(0)) { opened = true; break; }
+                System.Threading.Thread.Sleep(15);
+            }
+            if (!opened) return false;
             try
             {
                 EmptyClipboard();
@@ -232,15 +238,19 @@ internal static class ShellOps
 
     public static (string[] Paths, bool Move) ReadFileClipboard()
     {
-        try
+        Exception? last = null;
+        for (int attempt = 0; attempt < 10; attempt++)
         {
-            if (!Clipboard.ContainsFileDropList()) return (Array.Empty<string>(), false);
-            var paths = Clipboard.GetFileDropList().Cast<string>().Where(p => !string.IsNullOrWhiteSpace(p)).ToArray();
-            var move = false;
+            if (attempt > 0) System.Threading.Thread.Sleep(15);
             try
             {
                 var data = Clipboard.GetDataObject();
-                var raw = data?.GetData("Preferred DropEffect");
+                if (data == null || !data.GetDataPresent(DataFormats.FileDrop, true))
+                    return (Array.Empty<string>(), false);
+                var paths = (data.GetData(DataFormats.FileDrop, true) as System.Collections.IEnumerable)?
+                    .OfType<string>().Where(p => !string.IsNullOrWhiteSpace(p)).ToArray() ?? Array.Empty<string>();
+                if (paths.Length == 0) return (Array.Empty<string>(), false);
+                var raw = data.GetData("Preferred DropEffect");
                 var effect = 0;
                 if (raw is MemoryStream stream)
                 {
@@ -249,12 +259,12 @@ internal static class ShellOps
                     if (read == 4) effect = BitConverter.ToInt32(bytes, 0);
                 }
                 else if (raw is byte[] buffer && buffer.Length >= 4) effect = BitConverter.ToInt32(buffer, 0);
-                move = (effect & 2) != 0;
+                return (paths, (effect & 2) != 0);
             }
-            catch { }
-            return (paths, move);
+            catch (Exception e) { last = e; }
         }
-        catch (Exception e) { Program.Log(e); return (Array.Empty<string>(), false); }
+        if (last != null) Program.Log(last);
+        return (Array.Empty<string>(), false);
     }
 
     /// <summary>Data object for an OLE drag: real files for Explorer and apps, plus our reorder token.</summary>

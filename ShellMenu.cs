@@ -10,10 +10,12 @@ namespace MacDock;
 internal static class ShellMenu
 {
     internal static int LastItems, LastCommand;
+    internal static string LastVerb = "";
     internal static readonly List<string> LastVerbs=new();
     internal static readonly List<string> LastLabels=new();
     internal static readonly List<int> LastPositions=new();
     internal static Action? MenuDisplayed;
+    internal static Action<string, string>? BeforeInvokeCommand;
     internal static nint ActivePopup;
 
     const uint CMF_NORMAL = 0x0000;
@@ -201,6 +203,7 @@ internal static class ShellMenu
         }
         try
         {
+            LastCommand = 0; LastVerb = "";
             ActivePopup = popup;
             if (MenuDisplayed != null)
             {
@@ -220,8 +223,27 @@ internal static class ShellMenu
             Native.SetArrowCursor();
             InteractionChecks.Record?.Invoke("shell-track",null);LastCommand = TrackPopupMenuEx(popup, TPM_RETURNCMD | TPM_RIGHTBUTTON, x, y, owner, 0);
             if (LastCommand <= 0) return true; // cancellation is a successfully displayed menu
-            if(custom!=null&&custom.TryGetValue(LastCommand,out var selected)){selected.Run();return true;}
-            var buffer=Marshal.AllocHGlobal(512);try{if(context.GetCommandString(LastCommand-1,4,0,buffer,256)>=0&&string.Equals(Marshal.PtrToStringUni(buffer),"rename",StringComparison.OrdinalIgnoreCase)&&rename!=null){rename();return true;}}finally{Marshal.FreeHGlobal(buffer);}
+            if(custom!=null&&custom.TryGetValue(LastCommand,out var selected)){LastVerb=selected.Verb;selected.Run();return true;}
+            string verb = "";
+            var buffer=Marshal.AllocHGlobal(512);
+            try
+            {
+                Marshal.WriteInt16(buffer, 0);
+                if (context.GetCommandString(LastCommand - 1, 4, 0, buffer, 256) >= 0)
+                    verb = Marshal.PtrToStringUni(buffer) ?? "";
+                else
+                {
+                    Marshal.WriteByte(buffer, 0);
+                    if (context.GetCommandString(LastCommand - 1, 0, 0, buffer, 512) >= 0)
+                        verb = Marshal.PtrToStringAnsi(buffer) ?? "";
+                }
+            }
+            finally{Marshal.FreeHGlobal(buffer);}
+            LastVerb = verb;
+            if(string.Equals(verb,"rename",StringComparison.OrdinalIgnoreCase)&&rename!=null){rename();return true;}
+            var labelText=new System.Text.StringBuilder(512);
+            GetMenuString(popup,(uint)LastCommand,labelText,512,0);
+            BeforeInvokeCommand?.Invoke(verb, labelText.ToString());
             var info = new CMINVOKECOMMANDINFO
             {
                 cbSize = Marshal.SizeOf<CMINVOKECOMMANDINFO>(),

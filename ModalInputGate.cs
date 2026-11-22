@@ -4,7 +4,20 @@ namespace MacDock;
 // no screen-sized receiver window. Keep ownership of a dismissal's up even after hiding.
 internal sealed class ModalInputGate
 {
-    internal sealed record Regions(Native.Rect Drawer,Native.Rect Dock,bool Suspended=false,nint DrawerWindow=0,nint DockWindow=0,bool TextInput=false,bool Opening=false,GeniePose? Shape=null,double Scale=1,bool RedirectedForeground=false,nint SettingsWindow=0);
+    internal sealed record Regions(
+        Native.Rect Drawer,
+        Native.Rect Dock,
+        bool Suspended=false,
+        nint DrawerWindow=0,
+        nint DockWindow=0,
+        bool TextInput=false,
+        bool Opening=false,
+        GeniePose? Shape=null,
+        double Scale=1,
+        bool RedirectedForeground=false,
+        nint SettingsWindow=0,
+        nint[]? AssociatedWindows=null,
+        bool ShellCapturePending=false);
     internal volatile Regions? Current;
     readonly Action dismiss;
     readonly Action deactivate;
@@ -30,16 +43,16 @@ internal sealed class ModalInputGate
         var area=Current;
         if(area==null||area.Suspended)return false;
         var hit=area.DrawerWindow==0&&area.DockWindow==0?0:Native.WindowFromPoint(point);
-        if(InWindow(hit,area.SettingsWindow))return false;
-        if(area.TextInput&&hit!=0){var cls=Native.Class(hit);if(cls.StartsWith("Microsoft.IME.",StringComparison.Ordinal)||cls is "MSCTFIME UI" or "IME")return false;}
+        if(IsAssociatedWindow(hit,area))return false;
+        if(area.TextInput&&hit!=0&&Native.IsImeClass(Native.Class(hit)))return false;
         bool inDrawer=area.Drawer.Contains(point)&&(area.Shape==null||area.Shape.Contains((point.X-area.Drawer.Left)/area.Scale,(point.Y-area.Drawer.Top)/area.Scale));
         if(inDrawer&&(area.DrawerWindow==0||hit==area.DrawerWindow)||area.Dock.Contains(point)&&(area.DockWindow==0||hit==area.DockWindow||area.RedirectedForeground&&hit==area.DrawerWindow&&!inDrawer))return false;
         if(area.DrawerWindow!=0&&!area.Opening)
         {
             var foreground=Native.GetForegroundWindow();
-            if(foreground!=0&&foreground!=area.DrawerWindow&&foreground!=area.DockWindow)
+            if(foreground!=0&&foreground!=area.DrawerWindow&&foreground!=area.DockWindow&&!IsAssociatedWindow(foreground,area))
             {
-                if(Native.GetAncestor(foreground,3)==area.DrawerWindow)return false;
+                if(area.TextInput&&Native.IsImeClass(Native.Class(foreground)))return false;
                 Native.GetWindowThreadProcessId(foreground,out var process);
                 if(process!=Environment.ProcessId){Current=null;deactivate();return false;}
             }
@@ -50,6 +63,23 @@ internal sealed class ModalInputGate
         held|=bit;twiceButton=bit;twicePoint=point;twiceUntil=now+doubleTime;Current=null;dismiss();return true;
     }
 
+    internal static bool IsAssociatedWindow(nint hwnd,Regions area)
+    {
+        if(hwnd==0)return false;
+        if(InWindow(hwnd,area.SettingsWindow))return true;
+        if(area.AssociatedWindows is { Length:>0 } associated)
+        {
+            foreach(var w in associated)
+                if(InWindow(hwnd,w))return true;
+        }
+        var root=Native.GetAncestor(hwnd,2);
+        if(root==0)root=hwnd;
+        var rootOwner=Native.GetAncestor(hwnd,3);
+        if(root!=area.DrawerWindow&&root!=area.DockWindow&&rootOwner!=0&&(rootOwner==area.DrawerWindow||rootOwner==area.DockWindow))
+            return true;
+        return area.ShellCapturePending&&Native.IsShellDialogClass(root);
+    }
+
     internal static bool InWindow(nint hwnd,nint window) =>
-        hwnd!=0&&window!=0&&(hwnd==window||Native.GetAncestor(hwnd,3)==window);
+        hwnd!=0&&window!=0&&(hwnd==window||Native.GetAncestor(hwnd,2)==window||Native.GetAncestor(hwnd,3)==window);
 }

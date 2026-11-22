@@ -596,7 +596,7 @@ internal sealed class DrawerWindow : GlassWindow
         searchChrome=new Border{CornerRadius=new CornerRadius(9),Background=Theme.FillSoft,BorderBrush=Brushes.Transparent,BorderThickness=new Thickness(1)};
         searchHost.Children.Add(searchChrome);
         void SearchState(){searchChrome.Background=search.IsKeyboardFocusWithin||searchHost.IsMouseOver?Theme.FillHover:Theme.FillSoft;searchChrome.BorderBrush=search.IsKeyboardFocusWithin?Theme.FocusEdge:Brushes.Transparent;}
-        search.IsKeyboardFocusWithinChanged+=(_,_)=>SearchState();searchHost.MouseEnter+=(_,_)=>SearchState();searchHost.MouseLeave+=(_,_)=>SearchState();
+        search.IsKeyboardFocusWithinChanged+=(_,_)=>{SearchState();if(IsVisible&&!owner.DrawerClosing)owner.UpdateModalRegions();};searchHost.MouseEnter+=(_,_)=>SearchState();searchHost.MouseLeave+=(_,_)=>SearchState();
         search.GotKeyboardFocus+=(_,_)=>owner.SettleDrawerMotion();
         searchHost.Children.Add(fieldGrid);
         Theme.Tip(search, "搜索名称或路径");
@@ -823,7 +823,7 @@ internal sealed class DrawerWindow : GlassWindow
         var background = new ContextMenu();
         background.Opened += (_, _) =>
         {
-            owner.MenuOpen = true; background.Items.Clear();
+            owner.NotifyWpfMenuOpened(background); background.Items.Clear();
             void Add(string label, string? hint, Action action, bool enabled = true)
             {
                 var item = new MenuItem { Header = MenuHeader(label, hint), IsEnabled = enabled };
@@ -839,7 +839,7 @@ internal sealed class DrawerWindow : GlassWindow
             background.Items.Add(new Separator());
             Add("设置…", null, c.Settings);
         };
-        background.Closed += (_, _) => owner.MenuOpen = false;
+        background.Closed += (_, _) => owner.NotifyWpfMenuClosed(background);
         ContextMenu = background;
         ContextMenuOpening+=(_,a)=>
         {
@@ -847,7 +847,7 @@ internal sealed class DrawerWindow : GlassWindow
             a.Handled=true;
             if(PointerSort.Active!=null||owner.InternalDragging)return;
             if(a.CursorLeft<0&&a.CursorTop<0&&TryKeyboardMenu())return;
-            c.MenuOpen=true;Dispatcher.BeginInvoke(c.ShowDesktopBackground);
+            c.MenuOpen=true;Dispatcher.BeginInvoke(()=>{if(IsVisible&&!c.DrawerClosing)c.ShowDesktopBackground();else c.MenuOpen=false;});
         };
         SourceInitialized+=(_,_)=>HwndSource.FromHwnd(Handle).AddHook((nint hwnd,int message,nint wp,nint lp,ref bool handled)=>
         {
@@ -1167,7 +1167,7 @@ internal sealed class DrawerWindow : GlassWindow
                     position=new Native.Point((int)p.X,(int)p.Y);
                 }
                 owner.ShowNativeMenu(selection,position);
-                if(IsActive)FocusGrid();
+                if(IsActive&&owner.TrackedContextWindows.Count==0&&!owner.DrawerClosing)FocusGrid();
             }
             else if(tile.ContextMenu is ContextMenu menu)
             {
